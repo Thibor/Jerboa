@@ -25,14 +25,10 @@
 #define BKING 11
 #define LISTSIZE 150
 #define MOVESIZE 1000
-#define TTSIZE 1 << 20
-#define TTMASK TTSIZE - 1
-#define TIMEOUT 111111
 #define TEMPO 5
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define MAXPHASE 24
-#define LIKELYDRAW -111110
 #define MAX_PLY 64
 #define MATE 32000
 #define INF 32001
@@ -40,33 +36,33 @@
 #define VERSION "2026-03-27"
 #define START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-struct Position {
+typedef struct {
 	char board[8][8];
 	char pnbrqcount[2][5];
 	bool castling[2][2];
 	char kingpos[2];
 	short int epsquare;
-};
+}Position;
 
-struct SMoveList {
+typedef struct {
 	char move[8];
 	U64 hash;
 	char halfmoves;
-};
+}MoveList;
 
-struct list {
+typedef struct {
 	char move[8];
 	int eval;
 	bool ischeck;
-};
+}List;
 
-struct ttentry {
+typedef struct {
 	U64 hash;
 	char depth;
 	char type;
 	char bestmove[8];
 	int eval;
-};
+}TTEntry;
 
 typedef struct {
 	int post;
@@ -76,7 +72,7 @@ typedef struct {
 	U64 timeLimit;
 	U64 nodes;
 	U64 nodesLimit;
-} SSearchInfo;
+} SearchInfo;
 
 bool isattacker;
 char attacksw;
@@ -90,16 +86,18 @@ U64 HISTORYTABLE[2][64][64];
 char pvstack[5000][8];
 int pvptr = 0;
 
-SSearchInfo info;
-struct Position board;
-struct SMoveList moveList[MOVESIZE];
+SearchInfo info;
+Position board;
+MoveList moveList[MOVESIZE];
 char currentmove[8];
 
-struct ttentry TT[TTSIZE];
+const U64 tt_count = 64ULL << 14;
+const U64 tt_mask = (64ULL << 14) - 1;
+TTEntry tt[64ULL << 14];
 char current_mobility;
-const int boardsize = sizeof(struct Position);
-const int listsize = sizeof(struct list);
-const int movesize = sizeof(struct SMoveList);
+const int boardsize = sizeof(Position);
+const int listsize = sizeof(List);
+const int movesize = sizeof(MoveList);
 int betas, total;
 const int VALUES[5] = { 70, 348, 364, 473, 1024 };
 const int VALUES2[5] = { 91, 285, 295, 502, 932 };
@@ -264,8 +262,6 @@ short int kingdangertable[100] = {
 short int king_attack_count[2];
 
 short int futility[4] = { 125, 125, 300, 300 };
-char safecapture(struct Position* board, int file, int rank, char color);
-int UciCommand(struct Position* board, struct SMoveList* moveList, int* key, char* color, char* command);
 
 static U64 GetTimeMs() {
 	return GetTickCount64();
@@ -273,12 +269,12 @@ static U64 GetTimeMs() {
 
 static U64 Rand64() {
 	U64 r = rand();
-	for(int n=0;n<8;n++)
+	for (int n = 0; n < 8; n++)
 		r = (r << 8) ^ rand();
 	return r;
 }
 
-void setzobrist() {
+static void FillZobrist() {
 	for (int i = 0; i < 773; i++) {
 		ZOBRISTTABLE[i] = Rand64();
 	}
@@ -290,32 +286,36 @@ void setzobrist() {
 	}
 }
 
-void calc_pos(struct Position* board) {
+void GetHash(Position* board) {
 	CURRENTPOS = 0 ^ ZOBRISTTABLE[772];
-	int i, n;
-	for (i = 0; i < 8; i++) {
-		for (n = 0; n < 8; n++) {
-			if (board->board[n][i] != BLANK) {
+	for (int i = 0; i < 8; i++)
+		for (int n = 0; n < 8; n++)
+			if (board->board[n][i] != BLANK)
 				CURRENTPOS ^= ZOBRISTTABLE[(board->board[n][i] << 6) + (n << 3) + i];
-			}
-		}
-	}
 }
 
-void insert(U64 hash, int depth, int eval, char type, char* bestmove) {
-	U64 index = (hash & TTMASK);
-	TT[index].hash = hash;
-	TT[index].depth = depth;
-	TT[index].eval = eval;
-	TT[index].type = type;
-	memcpy(TT[index].bestmove, bestmove, 8);
+static void TTInsert(U64 hash, int depth, int eval, char type, char* bestmove) {
+	U64 index = hash & tt_mask;
+	tt[index].hash = hash;
+	tt[index].depth = depth;
+	tt[index].eval = eval;
+	tt[index].type = type;
+	memcpy(tt[index].bestmove, bestmove, 8);
 }
 
 
-void clearTT() {
-	for (int i = 0; i < TTSIZE; i++) {
-		TT[i].hash = 0;
-		TT[i].depth = 0;
+static int Permill() {
+	int pm = 0;
+	for (int n = 0; n < 1000; n++)
+		if (tt[n].hash)
+			pm++;
+	return pm;
+}
+
+static void ClearTT() {
+	for (int i = 0; i < tt_count; i++) {
+		tt[i].hash = 0;
+		tt[i].depth = 0;
 	}
 }
 
@@ -333,6 +333,7 @@ void clearHistory() {
 		}
 	}
 }
+
 void clearKiller() {
 	for (int i = 0; i < 50; i++) {
 		KILLERTABLE[i][0][0] = '\0';
@@ -340,17 +341,12 @@ void clearKiller() {
 	}
 }
 
-//to access zobrist number for say white knight on a6 we go zobristtable[(64*piece)+(file-1*8) + rank-1]
-//768-771 is castling
-//color key is 772
-void printfull(struct Position* board, char color) {
+static void PrintBoard(Position* board, char color) {
 	int i, n;
-	int until, diff; if (color == WHITE) {
+	int until, diff; if (color == WHITE)
 		i = 7, until = -1, diff = -1;
-	}
-	else {
+	else
 		i = 0, until = 8, diff = 1;
-	}
 	int nstart, nuntil, ndiff; if (color == WHITE) {
 		nstart = 0, nuntil = 8, ndiff = 1;
 	}
@@ -369,7 +365,7 @@ void printfull(struct Position* board, char color) {
 
 				switch (board->board[n][i]) {
 				case WPAWN:
-					printf("P "); break;
+					printf("A "); break;
 				case WKNIGHT:
 					printf("N "); break;
 				case WBISHOP:
@@ -381,7 +377,7 @@ void printfull(struct Position* board, char color) {
 				case WKING:
 					printf("K "); break;
 				case BPAWN:
-					printf("p "); break;
+					printf("a "); break;
 				case BKNIGHT:
 					printf("n "); break;
 				case BBISHOP:
@@ -399,7 +395,8 @@ void printfull(struct Position* board, char color) {
 	}
 	printf("+---+---+---+---+---+---+---+---+\n\n");
 }
-void move(struct Position* board, char* move, char color) {
+
+void move(Position* board, char* move, char color) {
 	board->epsquare = -10;
 	if (isupper(move[0])) {
 		int v = move[1] - 97, vv = atoi(&move[2]) - 1, w = move[4] - 97, ww = atoi(&move[5]) - 1;
@@ -513,7 +510,7 @@ void move(struct Position* board, char* move, char color) {
 	CURRENTPOS ^= ZOBRISTTABLE[772];
 }
 
-void move_add(struct Position* board, struct SMoveList* moveList, int* key, char* move, char color) {
+void move_add(Position* board, MoveList* moveList, int* key, char* move, char color) {
 	int k = *key;
 	memcpy(moveList[k].move, move, 8);
 	moveList[k].hash = CURRENTPOS;
@@ -526,7 +523,7 @@ void move_add(struct Position* board, struct SMoveList* moveList, int* key, char
 	*key = k + 1;
 }
 
-void setmovelist(struct SMoveList* moveList, int* key) {
+void setmovelist(MoveList* moveList, int* key) {
 	moveList[0].hash = CURRENTPOS;
 	*key = 1;
 	moveList[0].move[0] = '\0';
@@ -535,7 +532,7 @@ void setmovelist(struct SMoveList* moveList, int* key) {
 	return;
 }
 
-void pawn_add(struct list* list, int* key, char file1, char rank1, char file2, char rank2, char capture, char promote, bool en_passant) {
+void pawn_add(List* list, int* key, char file1, char rank1, char file2, char rank2, char capture, char promote, bool en_passant) {
 	int k = *key;
 	list[k].move[0] = file1, list[k].move[1] = rank1, list[k].move[2] = capture, list[k].move[3] = file2, list[k].move[4] = rank2, list[k].move[5] = '\0';
 	if (promote) {
@@ -548,7 +545,7 @@ void pawn_add(struct list* list, int* key, char file1, char rank1, char file2, c
 	*key = k + 1;
 }
 
-void piece_add(struct list* list, int* key, char file1, char rank1, char file2, char rank2, char capture, char type) {
+void piece_add(List* list, int* key, char file1, char rank1, char file2, char rank2, char capture, char type) {
 	int k = *key;
 	list[k].move[0] = type, list[k].move[1] = file1, list[k].move[2] = rank1, list[k].move[3] = capture, list[k].move[4] = file2, list[k].move[5] = rank2;
 	list[k].move[6] = '\0';
@@ -556,13 +553,68 @@ void piece_add(struct list* list, int* key, char file1, char rank1, char file2, 
 	*key = k + 1;
 }
 
-void king_moves(struct list* list, struct Position* board, int* key, char file, char rank, char color, bool needscapture) {
+char safecapture(Position* board, int file, int rank, char color) {
 	int n, i;
-	for (n = file - 1; n < file + 2 && n < 8; n++) {
-		for (i = rank - 1; i < rank + 2 && i < 8; i++) {
-			if ((n == file && i == rank) || n < 0 || i < 0) {
+	int flag = 2;
+	for (n = file - 2; n < file + 3 && n < 8; n++) {
+		if (n == file || n < 0) {
+			continue;
+		}
+		i = rank + (3 - abs(n - file));
+		if (i > -1 && i < 8 && board->board[n][i] - (color ^ 1) == WKNIGHT) {
+			return 0;
+		}
+		i = rank - (3 - abs(n - file));
+		if (i > -1 && i < 8 && board->board[n][i] - (color ^ 1) == WKNIGHT) {
+			return 0;
+		}
+	}
+	int letterchange, numchange;
+	for (letterchange = -1; letterchange < 2; letterchange++) {
+		for (numchange = -1; numchange < 2; numchange++) {
+			if (!letterchange && !numchange) {
 				continue;
 			}
+			int n = file + letterchange, i = rank + numchange;
+			while (n > -1 && n < 8 && i > -1 && i < 8 && board->board[n][i] % 2 != color) {
+				if (board->board[n][i] % 2 == (color ^ 1)) {
+					switch (board->board[n][i] - (color ^ 1)) {
+					case WQUEEN:
+						return 0;
+					case WROOK:
+						if (abs(letterchange + numchange) % 2 == 1) {
+							return 0;
+						} break;
+					case WBISHOP:
+						if (abs(letterchange + numchange) % 2 == 0) {
+							return 0;
+						} break;
+					case WPAWN:
+
+						if (abs(file - n) == 1 && ((color == WHITE && i - rank == 1) || (color == BLACK && rank - i == 1))) {
+							return 0;
+						} break;
+					case WKING:
+						if (abs(file - n) == 1 && abs(rank - 1) == 1) {
+							flag = 1; //if there are no other attackers, returning 1 will let us check if that piece is backed up because if so the king can't take it.
+						} break;
+					default:
+						break;
+					}
+					n = -10;
+				}
+				n += letterchange, i += numchange;
+			}
+		}
+	}
+	return flag;
+}
+
+void king_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture) {
+	for (int n = file - 1; n < file + 2 && n < 8; n++) {
+		for (int i = rank - 1; i < rank + 2 && i < 8; i++) {
+			if ((n == file && i == rank) || n < 0 || i < 0)
+				continue;
 			if (board->board[n][i] % 2 != color) {
 				if (board->board[n][i] == BLANK) {
 					if (!needscapture) {
@@ -576,7 +628,7 @@ void king_moves(struct list* list, struct Position* board, int* key, char file, 
 		}
 	}
 }
-void knight_moves(struct list* list, struct Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
+void knight_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
 	char n, i;
 	isattacker = false;
 	current_mobility = 0;
@@ -635,7 +687,7 @@ void knight_moves(struct list* list, struct Position* board, int* key, char file
 	}
 }
 
-void bishop_moves(struct list* list, struct Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
+void bishop_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
 	char letterchange, numchange;
 	isattacker = false;
 	char n, i;
@@ -674,7 +726,7 @@ void bishop_moves(struct list* list, struct Position* board, int* key, char file
 	}
 }
 
-void rook_moves(struct list* list, struct Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
+void rook_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
 	char letterchange, numchange;
 	char n, i;
 	isattacker = false;
@@ -726,7 +778,7 @@ void rook_moves(struct list* list, struct Position* board, int* key, char file, 
 	}
 }
 
-void queen_moves(struct list* list, struct Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
+void queen_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
 	int letterchange, numchange;
 	isattacker = false;
 	int n, i;
@@ -771,7 +823,7 @@ void queen_moves(struct list* list, struct Position* board, int* key, char file,
 	}
 }
 
-void pawn_moves(struct list* list, struct Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
+void pawn_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
 	int srank, lrank, diff;
 	if (color == WHITE) {
 		srank = 1, lrank = 7;
@@ -831,7 +883,7 @@ void pawn_moves(struct list* list, struct Position* board, int* key, char file, 
 	}
 }
 
-bool check_check(struct Position* board, char color) {
+bool check_check(Position* board, char color) {
 	int kingfile = board->kingpos[color] / 8, kingrank = board->kingpos[color] % 8;
 	int letterchange, numchange;
 	for (letterchange = -1; letterchange < 2; letterchange++) {
@@ -890,7 +942,7 @@ bool check_check(struct Position* board, char color) {
 
 }
 
-void castle_k(struct Position* board, struct list* list, int* key, struct SMoveList* moveList, char color) {
+void castle_k(Position* board, List* list, int* key, MoveList* moveList, char color) {
 
 	if (board->castling[color][1] == false) {
 		return;
@@ -909,7 +961,7 @@ void castle_k(struct Position* board, struct list* list, int* key, struct SMoveL
 	if (check_check(board, color)) {
 		return;
 	}
-	struct Position board2;
+	Position board2;
 	memcpy(board2.board, board->board, 64);
 	board2.board[4][rank] = BLANK, board2.board[5][rank] = WKING + color;
 	board2.kingpos[color] = board->kingpos[color] + 8;
@@ -928,7 +980,7 @@ void castle_k(struct Position* board, struct list* list, int* key, struct SMoveL
 	return;
 }
 
-void castle_q(struct Position* board, struct list* list, int* key, struct SMoveList* moveList, char color) {
+void castle_q(Position* board, List* list, int* key, MoveList* moveList, char color) {
 	if (board->castling[color][0] == false) {
 		return;
 	}
@@ -945,7 +997,7 @@ void castle_q(struct Position* board, struct list* list, int* key, struct SMoveL
 	if (check_check(board, color)) {
 		return;
 	}
-	struct Position board2;
+	Position board2;
 	memcpy(board2.board, board->board, 64);
 	board2.board[4][rank] = BLANK, board2.board[3][rank] = WKING + color;
 	board2.kingpos[color] = board->kingpos[color] - 8;
@@ -964,7 +1016,7 @@ void castle_q(struct Position* board, struct list* list, int* key, struct SMoveL
 	return;
 }
 
-void en_passant(struct Position* board, struct list* list, int* listkey, int* movelistkey, struct SMoveList* moveList, char color) {
+void en_passant(Position* board, List* list, int* listkey, int* movelistkey, MoveList* moveList, char color) {
 	if (board->epsquare == -10) {
 		return;
 	}
@@ -989,9 +1041,9 @@ void en_passant(struct Position* board, struct list* list, int* listkey, int* mo
 		pawn_add(list, listkey, file + 96, rank + '0' + 1, file + 97, rank + diff + 1 + '0', 'x', '\0', true);
 	}
 }
-void SMoveList(struct Position* board, struct list* list, struct SMoveList* moveList, int* mkey, char color) {
+
+void SMoveList(Position* board, List* list, MoveList* moveList, int* mkey, char color) {
 	int key = 0;
-	int k;
 	for (int n = 0; n < 8; n++) {
 		for (int i = 0; i < 8; i++) {
 			if (board->board[n][i] % 2 == color) {
@@ -1013,7 +1065,7 @@ void SMoveList(struct Position* board, struct list* list, struct SMoveList* move
 					for (int i = 1; i < *mkey; i++) {
 						printf("%s ", moveList[i].move);
 					}
-					printfull(board, color);
+					PrintBoard(board, color);
 					exit(1);
 				}
 			}
@@ -1024,7 +1076,7 @@ void SMoveList(struct Position* board, struct list* list, struct SMoveList* move
 	en_passant(board, list, &key, mkey, moveList, color);
 }
 
-void movelistq(struct Position* board, struct list* list, struct SMoveList* moveList, int* mkey, char color) {
+void movelistq(Position* board, List* list, MoveList* moveList, int* mkey, char color) {
 	int key = 0;
 	for (int n = 0; n < 8; n++) {
 		for (int i = 0; i < 8; i++) {
@@ -1044,7 +1096,7 @@ void movelistq(struct Position* board, struct list* list, struct SMoveList* move
 					king_moves(list, board, &key, n, i, color, true); break;
 				default:
 					printf("error reading board\n");
-					printfull(board, color);
+					PrintBoard(board, color);
 					exit(1);
 				}
 			}
@@ -1053,25 +1105,20 @@ void movelistq(struct Position* board, struct list* list, struct SMoveList* move
 	en_passant(board, list, &key, mkey, moveList, color);
 }
 
-bool checkdraw1(struct Position* board) {
+bool checkdraw1(Position* board) {
 	if (board->pnbrqcount[0][0] || board->pnbrqcount[0][3] || board->pnbrqcount[0][4] ||
-		board->pnbrqcount[1][0] || board->pnbrqcount[1][3] || board->pnbrqcount[1][4]) {
+		board->pnbrqcount[1][0] || board->pnbrqcount[1][3] || board->pnbrqcount[1][4])
 		return false;
-	}
-	if (board->pnbrqcount[0][2] > 1 || board->pnbrqcount[1][2] > 1) {
+	if (board->pnbrqcount[0][2] > 1 || board->pnbrqcount[1][2] > 1)
 		return false;
-	}
-	if (board->pnbrqcount[0][1] > 2 || board->pnbrqcount[1][1] > 2) {
+	if (board->pnbrqcount[0][1] > 2 || board->pnbrqcount[1][1] > 2)
 		return false;
-	}
-	if ((board->pnbrqcount[0][1] && board->pnbrqcount[0][2]) || (board->pnbrqcount[0][1] && board->pnbrqcount[0][2])) {
+	if ((board->pnbrqcount[0][1] && board->pnbrqcount[0][2]) || (board->pnbrqcount[0][1] && board->pnbrqcount[0][2]))
 		return false;
-	}
 	return true;
-
 }
 
-int checkdraw2(struct SMoveList* moveList, int* key) {
+int checkdraw2(MoveList* moveList, int* key) {
 	if (moveList[*key - 1].halfmoves > 99) {
 		return 2;
 	}
@@ -1129,7 +1176,7 @@ char* uci_move(char* move, char* temp, char color) {
 	return temp;
 }
 
-char* move_to_uci(char* uci, char* temp, char color, struct Position* board) {
+char* move_to_uci(char* uci, char* temp, char color, Position* board) {
 	if ((color == WHITE && board->board[4][0] == WKING && uci[1] == '1') || (color == BLACK && board->board[4][7] == BKING && uci[1] == '8')) {
 		if (uci[2] == 'g' && uci[0] == 'e') {
 			strcpy(temp, "0-0\0");
@@ -1196,64 +1243,7 @@ static int InputAvailable(void) {
 	}
 }
 
-char safecapture(struct Position* board, int file, int rank, char color) {
-	int n, i;
-	int flag = 2;
-	for (n = file - 2; n < file + 3 && n < 8; n++) {
-		if (n == file || n < 0) {
-			continue;
-		}
-		i = rank + (3 - abs(n - file));
-		if (i > -1 && i < 8 && board->board[n][i] - (color ^ 1) == WKNIGHT) {
-			return 0;
-		}
-		i = rank - (3 - abs(n - file));
-		if (i > -1 && i < 8 && board->board[n][i] - (color ^ 1) == WKNIGHT) {
-			return 0;
-		}
-	}
-	int letterchange, numchange;
-	for (letterchange = -1; letterchange < 2; letterchange++) {
-		for (numchange = -1; numchange < 2; numchange++) {
-			if (!letterchange && !numchange) {
-				continue;
-			}
-			int n = file + letterchange, i = rank + numchange;
-			while (n > -1 && n < 8 && i > -1 && i < 8 && board->board[n][i] % 2 != color) {
-				if (board->board[n][i] % 2 == (color ^ 1)) {
-					switch (board->board[n][i] - (color ^ 1)) {
-					case WQUEEN:
-						return 0;
-					case WROOK:
-						if (abs(letterchange + numchange) % 2 == 1) {
-							return 0;
-						} break;
-					case WBISHOP:
-						if (abs(letterchange + numchange) % 2 == 0) {
-							return 0;
-						} break;
-					case WPAWN:
-
-						if (abs(file - n) == 1 && ((color == WHITE && i - rank == 1) || (color == BLACK && rank - i == 1))) {
-							return 0;
-						} break;
-					case WKING:
-						if (abs(file - n) == 1 && abs(rank - 1) == 1) {
-							flag = 1; //if there are no other attackers, returning 1 will let us check if that piece is backed up because if so the king can't take it.
-						} break;
-					default:
-						break;
-					}
-					n = -10;
-				}
-				n += letterchange, i += numchange;
-			}
-		}
-	}
-	return flag;
-}
-
-int see(struct Position* board, char* mve, char color) {
+int see(Position* board, char* mve, char color) {
 
 	int i;
 	int attacker, victim;
@@ -1313,7 +1303,7 @@ int see(struct Position* board, char* mve, char color) {
 	return 160 + ((victim - attacker) / 1000);
 }
 
-void selectionsort(struct list* list, int k) {
+void selectionsort(List* list, int k) {
 	int temp = k;
 	int i = k; while (list[i].move[0] != '\0') {
 		if (list[i].eval > list[temp].eval) {
@@ -1330,7 +1320,7 @@ void selectionsort(struct list* list, int k) {
 	list[k].eval = tempevl;
 }
 
-int material(struct Position* board, int* phase) {
+int material(Position* board, int* phase) {
 	int wval = 0, bval = 0;
 	for (int i = 0; i < 5; i++) {
 		if (i == 4) {
@@ -1359,9 +1349,10 @@ int material(struct Position* board, int* phase) {
 	}
 	return wval - bval;
 }
-float passedmult(struct Position* board, int pawnfile, int pawnrank, bool endgameflag, char color) {
+
+double passedmult(Position* board, int pawnfile, int pawnrank, bool endgameflag, char color) {
 	//return 1;
-	float mult = 1;
+	double mult = 1;
 	if ((color == WHITE && board->board[pawnfile][pawnrank + 1] != BLANK) || (color == BLACK && board->board[pawnfile][pawnrank - 1] != BLANK)) {
 		mult = 0.6;
 	} //give a penalty if there's something in front of the passed pawn.
@@ -1386,7 +1377,8 @@ float passedmult(struct Position* board, int pawnfile, int pawnrank, bool endgam
 	}
 	return mult;
 }
-int pstscore(struct Position* board, int phase, short int* blockedpawns, char wbackwards[8], char bbackwards[8], int* values, int* values1) {
+
+int pstscore(Position* board, int phase, short int* blockedpawns, char wbackwards[8], char bbackwards[8], int* values, int* values1) {
 	char revphase = MAXPHASE - phase;
 	int wscore = 0, bscore = 0;
 	char wadvanced[8], badvanced[8];
@@ -1434,7 +1426,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					}
 				}
 				else if (board->board[n][i] == WBISHOP) {
-					bishop_moves((struct list*)0, board, &dummy_key, n, i, WHITE, false, false);
+					bishop_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
 					if (isattacker) {
 						attacksw++;
 					}
@@ -1442,7 +1434,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					wscore += (bishoptable[n][i] * phase + bishoptable2[n][i] * (revphase)) / MAXPHASE;
 				}
 				else if (board->board[n][i] == WKNIGHT) {
-					knight_moves((struct list*)0, board, &dummy_key, n, i, WHITE, false, false);
+					knight_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
 					if (isattacker) {
 						attacksw++;
 					}
@@ -1450,7 +1442,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					wscore += (phase * knighttable[n][i] + (revphase)*knighttable2[n][i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == WROOK) {
-					rook_moves((struct list*)0, board, &dummy_key, n, i, WHITE, false, false);
+					rook_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
 					if (isattacker) {
 						attacksw++;
 					}
@@ -1458,7 +1450,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					wscore += (phase * rooktable[n][i] + (revphase)*rooktable2[n][i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == WQUEEN) {
-					queen_moves((struct list*)0, board, &dummy_key, n, i, WHITE, false, false);
+					queen_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
 					if (isattacker) {
 						attacksw += 2;
 					}
@@ -1483,7 +1475,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					}
 				}
 				else if (board->board[n][i] == BBISHOP) {
-					bishop_moves((struct list*)0, board, &dummy_key, n, i, BLACK, false, false);
+					bishop_moves((List*)0, board, &dummy_key, n, i, BLACK, false, false);
 					if (isattacker) {
 						attacksb++;
 					}
@@ -1492,7 +1484,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 				}
 				else if (board->board[n][i] == BKNIGHT) {
 
-					knight_moves((struct list*)0, board, &dummy_key, n, i, BLACK, false, false);
+					knight_moves((List*)0, board, &dummy_key, n, i, BLACK, false, false);
 					if (isattacker) {
 						attacksb++;
 					}
@@ -1500,7 +1492,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					bscore += (phase * knighttable[n][7 - i] + (revphase)*knighttable2[n][7 - i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == BROOK) {
-					rook_moves((struct list*)0, board, &dummy_key, n, i, BLACK, false, false);
+					rook_moves((List*)0, board, &dummy_key, n, i, BLACK, false, false);
 					bscore += (phase * rookmobilitymg[current_mobility] + (revphase)*rookmobilityeg[current_mobility]) / MAXPHASE;
 					if (isattacker) {
 						attacksb++;
@@ -1508,7 +1500,7 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 					bscore += (phase * rooktable[n][7 - i] + (revphase)*rooktable2[n][7 - i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == BQUEEN) {
-					queen_moves((struct list*)0, board, &dummy_key, n, i, BLACK, false, false);
+					queen_moves((List*)0, board, &dummy_key, n, i, BLACK, false, false);
 					if (isattacker) {
 						attacksb += 2;
 					}
@@ -1603,7 +1595,8 @@ int pstscore(struct Position* board, int phase, short int* blockedpawns, char wb
 	}
 	return wscore - bscore;
 }
-int space(struct Position* board, short int* blockedpawns, int wspace, int bspace) {
+
+int space(Position* board, short int* blockedpawns, int wspace, int bspace) {
 
 	int weight0 = 0, weight1 = 0;
 
@@ -1619,7 +1612,8 @@ int space(struct Position* board, short int* blockedpawns, int wspace, int bspac
 	if (weight1 < 0) { weight1 = 0; }
 	return ((wspace * weight0 * weight0 / 16) - (bspace * weight1 * weight1 / 16)) / 2;
 }
-int kingsafety(struct Position* board, char wbackwards[8], char bbackwards[8]) {
+
+int kingsafety(Position* board, char wbackwards[8], char bbackwards[8]) {
 	float pawnsw = 0, pawnsb = 0; //pawnsw is how many pawns are around the white king, pawnsb the black.
 	int n = board->kingpos[WHITE] / 8, n1 = board->kingpos[BLACK] / 8, i = board->kingpos[WHITE] % 8, i1 = board->kingpos[BLACK] % 8;
 	for (int a = n - 1; a < n + 2 && a < 8; a++) {
@@ -1665,7 +1659,7 @@ int kingsafety(struct Position* board, char wbackwards[8], char bbackwards[8]) {
 	return (wval - bval) * 2 / 3; //this weight needs to be calibrated
 }
 
-int eval(struct Position* board, char color) {
+int eval(Position* board, char color) {
 	attacksw = 0, attacksb = 0;
 	king_attack_count[WHITE] = 0, king_attack_count[BLACK] = 0;
 	int phase = 0; //0 represents full phase, 40 represents complete middlegame
@@ -1675,18 +1669,18 @@ int eval(struct Position* board, char color) {
 
 	if (phase == 0 && board->pnbrqcount[WHITE][0] + board->pnbrqcount[BLACK][0] == 1) {  //for king and one pawn endgames
 		if (board->pnbrqcount[WHITE][0] == 1) {
-			int n = board->kingpos[BLACK] / 8, i = board->kingpos[BLACK] % 8;
-			if (n == 8 || n == 0) {
-				while (i > 1) {
-					i--;
-					if (board->board[n][i] == WPAWN) {
-						return LIKELYDRAW;
+			int rank = board->kingpos[BLACK] / 8, file = board->kingpos[BLACK] % 8;
+			if (rank == 8 || rank == 0) {
+				while (file > 1) {
+					file--;
+					if (board->board[rank][file] == WPAWN) {
+						return 0;
 					}
 				}
 			}
 			else {
-				if (i < 7 && (board->board[n][i - 1] == WPAWN || board->board[n][i - 2] == WPAWN)) {
-					return LIKELYDRAW;
+				if (file < 7 && (board->board[rank][file - 1] == WPAWN || board->board[rank][file - 2] == WPAWN)) {
+					return 0;
 				}
 			}
 		}
@@ -1696,15 +1690,13 @@ int eval(struct Position* board, char color) {
 				while (i < 6) {
 					i++;
 					if (board->board[n][i] == BPAWN) {
-						return LIKELYDRAW;
+						return 0;
 					}
 				}
 			}
-			else {
-				if (i > 1 && (board->board[n][i + 1] == BPAWN || board->board[n][i + 2] == BPAWN)) {
-					return LIKELYDRAW;
-				}
-			}
+			else
+				if (i > 1 && (board->board[n][i + 1] == BPAWN || board->board[n][i + 2] == BPAWN))
+					return 0;
 		}
 	}
 
@@ -1737,7 +1729,8 @@ int eval(struct Position* board, char color) {
 		return -evl + TEMPO;
 	}
 }
-void movescore(struct Position* board, struct list* list, int ply, char color, char type, bool ispv, char* lastmove) {
+
+void movescore(Position* board, List* list, int ply, char color, char type, bool ispv, char* lastmove) {
 	int evl;
 	char mve[8];
 	mve[0] = '\0';
@@ -1765,7 +1758,7 @@ void movescore(struct Position* board, struct list* list, int ply, char color, c
 	int i = 0; while (list[i].move[0] != '\0') {
 		int evl;
 
-		if ((type != 'n') && !strcmp(TT[CURRENTPOS & TTMASK].bestmove, list[i].move)) {
+		if ((type != 'n') && !strcmp(tt[CURRENTPOS & tt_mask].bestmove, list[i].move)) {
 			list[i].eval = 10000;
 		}
 		else if (islower(list[i].move[0]) && list[i].move[5] == 'Q') {
@@ -1808,7 +1801,7 @@ void movescore(struct Position* board, struct list* list, int ply, char color, c
 	}
 }
 
-static int CheckUp(struct Position* board, struct SMoveList* moveList, int* key, char* color) {
+static int CheckUp(Position* board, MoveList* moveList, int* key, char* color) {
 	if ((++info.nodes & 0xffff) == 0) {
 		if (info.timeLimit && GetTimeMs() - info.timeStart > info.timeLimit)
 			info.stop = TRUE;
@@ -1823,32 +1816,19 @@ static int CheckUp(struct Position* board, struct SMoveList* moveList, int* key,
 	return info.stop;
 }
 
-int SearchQuiesce(struct Position* board, struct SMoveList* moveList, int* key, int alpha, int beta, int ply, int maxdepth, char color, bool incheck) {
+int SearchQuiesce(Position* board, MoveList* moveList, int* key, int alpha, int beta, int ply, int maxdepth, char color, bool incheck) {
 	if (CheckUp(board, moveList, key, color))
 		return 0;
 	long long unsigned int original_pos = CURRENTPOS;
-	int staticEval;
-	if (!incheck || ply > maxdepth) {
-		staticEval = eval(board, color);
-	}
-	else {
-		staticEval = -100000;
-	}
-	if (ply > maxdepth || staticEval == TIMEOUT) {
-		return staticEval;
-	}
-
-	if (staticEval >= beta && !incheck) {
+	int staticEval = eval(board, color);
+	if (staticEval >= beta && !incheck)
 		return beta;
-	}
-
-	if (staticEval > alpha) {
+	if (staticEval > alpha)
 		alpha = staticEval;
-	}
 	if (staticEval + 1125 < alpha && !incheck) {
 		return alpha;
 	}
-	struct list list[LISTSIZE];
+	List list[LISTSIZE];
 	list[0].move[0] = '\0';
 
 	if (incheck) {
@@ -1871,7 +1851,7 @@ int SearchQuiesce(struct Position* board, struct SMoveList* moveList, int* key, 
 			CURRENTPOS = original_pos;
 			return alpha;
 		}
-		struct Position board2;
+		Position board2;
 		memcpy(&board2, board, boardsize);
 		move(&board2, list[i].move, color);
 		if (check_check(&board2, color)) {
@@ -1909,15 +1889,6 @@ int SearchQuiesce(struct Position* board, struct SMoveList* moveList, int* key, 
 			}
 		}
 		list[i].eval = -SearchQuiesce(&board2, moveList, key, -beta, -alpha, ply + 1, maxdepth, color ^ 1, ischeck);
-
-
-
-		if (abs(list[i].eval) == TIMEOUT) {
-			moveList[*key - 1].move[0] = '\0';
-			*key = *key - 1;
-			CURRENTPOS = original_pos;
-			return TIMEOUT;
-		}
 		if (list[i].eval >= beta) {
 			moveList[*key - 1].move[0] = '\0';
 			*key = *key - 1;
@@ -1932,39 +1903,34 @@ int SearchQuiesce(struct Position* board, struct SMoveList* moveList, int* key, 
 		CURRENTPOS = original_pos;
 		i++;
 	}
-
-	if (incheck && !ismove) {
-		return -100000;
-	}
 	return alpha;
 }
 
-int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, int alpha, int beta, int depthleft, int ply, char color, bool isnull, bool incheck) {
+int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int beta, int depthleft, int ply, char color, bool isnull, bool incheck) {
 	if (CheckUp(board, moveList, key, color))
 		return 0;
 	if (ply > 0) {
-		if (checkdraw2(moveList, key) > 0 || checkdraw1(board)) {
+		if (checkdraw2(moveList, key) > 0 || checkdraw1(board))
 			return 0;
-		}
-		int mate_distance = 100000 - ply;
+		int mate_distance = MATE - ply;
 		if (mate_distance < beta) {
 			beta = mate_distance;
-			if (alpha >= beta) 
+			if (alpha >= beta)
 				return beta;
 		}
 	}
 	char type;
 	int evl;
-	if (CURRENTPOS == TT[CURRENTPOS & TTMASK].hash) {
-		type = TT[CURRENTPOS & TTMASK].type;
-		evl = TT[CURRENTPOS & TTMASK].eval;
+	if (CURRENTPOS == tt[CURRENTPOS & tt_mask].hash) {
+		type = tt[CURRENTPOS & tt_mask].type;
+		evl = tt[CURRENTPOS & tt_mask].eval;
 	}
 	else {
 		type = 'n';
 		evl = -1024;
 	}
 	bool ispv = (beta != alpha + 1);
-	if (!ispv && type != 'n' && TT[CURRENTPOS & TTMASK].depth >= depthleft) {
+	if (!ispv && type != 'n' && tt[CURRENTPOS & tt_mask].depth >= depthleft) {
 		if (type == '0') {
 			if (evl > beta) {
 				return beta;
@@ -1990,16 +1956,16 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 
 	if (depthleft <= 0) {
 		int b = SearchQuiesce(board, moveList, key, alpha, beta, 0, 15, color, incheck);
-		if (b == -100000) {
+		if (b == -MATE) {
 			b += ply;
 		}
-		if (b == 100000) {
+		if (b == MATE) {
 			b -= ply;
 		}
 		return b;
 	}
 	if (incheck) {
-		evl = -1000000;
+		evl = -MATE;
 	}
 	else {
 		evl = eval(board, color);
@@ -2025,8 +1991,8 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 				int R = 3 + (depthleft / 8);
 				int nullmove = -SearchAlpha(board, moveList, key, -beta, -beta + 1, depthleft - 1 - R, ply + 2, color ^ 1, true, false);
 				CURRENTPOS = a;
-		if(info.stop)
-			return 0;
+				if (info.stop)
+					return 0;
 				if (nullmove >= beta) {
 					return beta;
 				}
@@ -2038,7 +2004,7 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 		depthleft--;
 	}
 
-	struct list list[LISTSIZE];
+	List list[LISTSIZE];
 	list[0].move[0] = '\0';
 	bool ismove = false;
 	bool firstmove = true;
@@ -2053,7 +2019,7 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 	pvstack[pvptr++][0] = '\0';
 	char bestmove[8];
 	bool _fprune = false;
-	if (depthleft < 5 && !incheck && !ispv && alpha > -1000000 && evl + (futility[depthleft - 1]) < alpha && (depthleft < 4 || type == 'n')) {
+	if (depthleft < 5 && !incheck && !ispv && alpha > -MATE && evl + (futility[depthleft - 1]) < alpha && (depthleft < 4 || type == 'n')) {
 		_fprune = true;
 	}
 
@@ -2065,7 +2031,7 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 	while (list[i].move[0] != '\0' && !movecountprune) {
 		selectionsort(list, i);
 
-		struct Position board2;
+		Position board2;
 		memcpy(&board2, board, boardsize);
 		move(&board2, list[i].move, color);
 		if (check_check(&board2, color)) {
@@ -2093,16 +2059,8 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 		}
 		move_add(&board2, moveList, key, list[i].move, color);
 
-		if (ispv == true && firstmove) {
+		if (ispv == true && firstmove)
 			list[i].eval = -SearchAlpha(&board2, moveList, key, -beta, -alpha, depthleft - 1, ply + 1, color ^ 1, false, ischeck);
-			if (abs(list[i].eval) == TIMEOUT) {
-				moveList[*key - 1].move[0] = '\0';
-				*key = *key - 1;
-				CURRENTPOS = original_pos;
-
-				return TIMEOUT;
-			}
-		}
 
 		else {
 			int R = 0;
@@ -2125,37 +2083,15 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 
 
 			list[i].eval = -SearchAlpha(&board2, moveList, key, -alpha - 1, -alpha, depthleft - 1 - R, ply + 1, color ^ 1, false, ischeck);
-			if (abs(list[i].eval) == TIMEOUT) {
-				moveList[*key - 1].move[0] = '\0';
-				*key = *key - 1;
-				CURRENTPOS = original_pos;
 
-				return 0;
-			}
-
-			if (list[i].eval > alpha && R > 0) {
+			if (list[i].eval > alpha && R > 0)
 				list[i].eval = -SearchAlpha(&board2, moveList, key, -alpha - 1, -alpha, depthleft - 1, ply + 1, color ^ 1, false, ischeck);
-				if (abs(list[i].eval) == TIMEOUT) {
-					moveList[*key - 1].move[0] = '\0';
-					*key = *key - 1;
-					CURRENTPOS = original_pos;
-
-					return 0;
-				}
-			}
 
 			if (list[i].eval > alpha && ispv) {
 				if (R > 0) {
 					R = 0;
 				}
 				list[i].eval = -SearchAlpha(&board2, moveList, key, -beta, -alpha, depthleft - 1, ply + 1, color ^ 1, false, ischeck);
-				if (abs(list[i].eval) == TIMEOUT) {
-					moveList[*key - 1].move[0] = '\0';
-					*key = *key - 1;
-					CURRENTPOS = original_pos;
-
-					return 0;
-				}
 			}
 		}
 
@@ -2167,7 +2103,7 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 				memcpy(currentmove, list[i].move, 8);
 			}
 			memcpy(bestmove, list[i].move, 8);
-			insert(original_pos, depthleft, beta, '1', bestmove);
+			TTInsert(original_pos, depthleft, beta, '1', bestmove);
 			total++;
 			if (betacount < 5)
 				betas++;
@@ -2191,7 +2127,7 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 						[((list[i].move[pos + 3] - 97) * 8) + atoi(&list[i].move[pos + 4]) - 1] += c;
 
 					if (HISTORYTABLE[color][((list[i].move[pos] - 97) * 8) + atoi(&list[i].move[pos + 1]) - 1]
-						[((list[i].move[pos + 3] - 97) * 8) + atoi(&list[i].move[pos + 4]) - 1] > 1000000) {
+						[((list[i].move[pos + 3] - 97) * 8) + atoi(&list[i].move[pos + 4]) - 1] > MATE) {
 						for (int a = 0; a < 64; a++) {
 							for (int b = 0; b < 64; b++) {
 								HISTORYTABLE[color][a][b] /= 2;
@@ -2249,7 +2185,7 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 		}
 
 		else if (firstmove && ply == 0) {
-			insert(original_pos, depthleft, alpha, '2', list[i].move);
+			TTInsert(original_pos, depthleft, alpha, '2', list[i].move);
 			CURRENTPOS = original_pos;
 			pvptr = pvstart;
 			return alpha;
@@ -2272,18 +2208,18 @@ int SearchAlpha(struct Position* board, struct SMoveList* moveList, int* key, in
 		}
 	}
 	if (raisedalpha) {
-		insert(original_pos, depthleft, alpha, '0', bestmove);
+		TTInsert(original_pos, depthleft, alpha, '0', bestmove);
 	}
 	else {
 		char j[8];
 		j[0] = '\0';
-		insert(original_pos, depthleft, alpha, '2', j);
+		TTInsert(original_pos, depthleft, alpha, '2', j);
 	}
 	return alpha;
 }
 
 
-static void SearchIteratively(struct Position* board, struct SMoveList* moveList, int* key, char color) {
+static void SearchIteratively(Position* board, MoveList* moveList, int* key, char color) {
 	clearPV();
 	clearHistory();
 	clearKiller();
@@ -2316,12 +2252,9 @@ static void SearchIteratively(struct Position* board, struct SMoveList* moveList
 		else
 			printf("mate %d", (score > 0 ? (MATE - score + 1) >> 1 : -(MATE + score) >> 1));
 		printf(" time %lld", GetTimeMs() - info.timeStart);
-		printf(" nodes %lld pv ", info.nodes);
-		//printf("info depth %i score cp %i nodes %lld time %lld pv ",depth, score,info.nodes, GetTimeMs() - info.timeStart);
-		for (int i = 0; i < depth && pvstack[i][0] != '\0'; i++) {
-			char temp[8];
+		printf(" nodes %lld hashfull %d pv ", info.nodes, Permill());
+		for (int i = 0; i < depth && pvstack[i][0] != '\0'; i++)
 			printf("%s ", pvstack[i]);
-		}
 		printf("\n");
 		if (depth > 5) {
 			alpha = score - 25;
@@ -2333,7 +2266,7 @@ static void SearchIteratively(struct Position* board, struct SMoveList* moveList
 	fflush(stdout);
 }
 
-static void SetFen(struct Position* board, struct SMoveList* moveList, int* key, char* fenstring, char* color) {
+static void SetFen(Position* board, MoveList* moveList, int* key, char* fenstring, char* color) {
 	int i = 7, n = 0;
 	int fenkey = 0;
 	board->castling[WHITE][0] = false, board->castling[BLACK][0] = false, board->castling[WHITE][1] = false, board->castling[BLACK][1] = false;
@@ -2392,7 +2325,7 @@ static void SetFen(struct Position* board, struct SMoveList* moveList, int* key,
 	else {
 		*color = BLACK;  //color to move
 	}
-	calc_pos(board);
+	GetHash(board);
 	setmovelist(moveList, key);
 	while (isblank(fenstring[fenkey])) {
 		fenkey++;
@@ -2476,7 +2409,7 @@ static void ResetInfo() {
 	info.post = TRUE;
 }
 
-static void ParsePosition(struct Position* board, struct SMoveList* moveList, int* key, char* color, char* ptr) {
+static void ParsePosition(Position* board, MoveList* moveList, int* key, char* color, char* ptr) {
 	char token[80], fen[80];
 	ptr = ParseToken(ptr, token);
 	if (strcmp(token, "fen") == 0) {
@@ -2507,7 +2440,7 @@ static void ParsePosition(struct Position* board, struct SMoveList* moveList, in
 		}
 }
 
-static void ParseGo(struct Position* board, struct SMoveList* moveList, int* key, char* color, char* command) {
+static void ParseGo(Position* board, MoveList* moveList, int* key, char* color, char* command) {
 	ResetInfo();
 	int wtime = 0;
 	int btime = 0;
@@ -2538,11 +2471,9 @@ static void ParseGo(struct Position* board, struct SMoveList* moveList, int* key
 	SearchIteratively(board, moveList, key, *color);
 }
 
-int UciCommand(struct Position* board, struct SMoveList* moveList, int* key, char* color, char* command) {
+int UciCommand(Position* board, MoveList* moveList, int* key, char* color, char* command) {
 	if (!strncmp(command, "ucinewgame", 10)) {
-		clearTT(true);
-		clearKiller();
-		clearHistory();
+		ClearTT();
 		for (int i = 0; i < MOVESIZE; i++) {
 			moveList[i].halfmoves = 0;
 			moveList[i].hash = 0;
@@ -2558,6 +2489,7 @@ int UciCommand(struct Position* board, struct SMoveList* moveList, int* key, cha
 		printf("readyok\n");
 		fflush(stdout);
 	}
+	else if (!strncmp(command, "print", 5))PrintBoard(board, color);
 	else if (!strncmp(command, "stop", 4))info.stop = true;
 	else if (!strncmp(command, "quit", 4))exit(0);
 	else if (strstr(command, "position"))ParsePosition(board, moveList, key, color, command + 8);
@@ -2565,7 +2497,7 @@ int UciCommand(struct Position* board, struct SMoveList* moveList, int* key, cha
 	return 0;
 }
 
-static int UciLoop() {
+static void UciLoop() {
 	int key;
 	char color;
 	SetFen(&board, moveList, &key, START_FEN, &color);
@@ -2577,7 +2509,7 @@ static int UciLoop() {
 
 int main(void) {
 	printf("%s %s\n", NAME, VERSION);
-	setzobrist();
+	FillZobrist();
 	UciLoop();
 	return 0;
 }
