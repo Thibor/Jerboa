@@ -4,7 +4,7 @@
 <img src="/Resources/Jerboa.png" />
     <br>
     <br>
-    <b><i>Small uci chess engine 2400 elo.</i></b>
+    <b><i>Single file uci chess engine 2400 elo.</i></b>
     <br>
     <br>
     <img src="https://img.shields.io/github/downloads/Thibor/Jerboa/total?color=critical&style=for-the-badge">
