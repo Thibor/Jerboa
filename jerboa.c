@@ -36,6 +36,8 @@
 #define VERSION "2026-03-27"
 #define START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
+enum Bound{ UPPER, LOWER, EXACT };
+
 typedef struct {
 	char board[8][8];
 	char pnbrqcount[2][5];
@@ -102,7 +104,7 @@ int betas, total;
 const int VALUES[5] = { 70, 348, 364, 473, 1024 };
 const int VALUES2[5] = { 91, 285, 295, 502, 932 };
 
-short int pawntable[8][8] = {
+short int pawnTableMg[8][8] = {
 {0, -28, -22, -29, -18, -16,  70,   0},
 {0,  -1, -10, -13,   2,  -2, 104,   0},
 {0, -13,   1,  -3,  -2,  13,  35,   0},
@@ -113,7 +115,7 @@ short int pawntable[8][8] = {
 {0, -17, -12, -26, -23, -23,  -7,   0}
 };
 
-short int pawntable2[8][8] = {
+short int pawnTableEg[8][8] = {
 {0,  16,   7,  20,  32,  74, 179,   0},
 {0,   4,   3,   9,  20,  77, 154,   0},
 {0,   8,  -3,  -2,   9,  56, 144,   0},
@@ -124,7 +126,7 @@ short int pawntable2[8][8] = {
 {0,  -7,  -8,   1,  12,  64, 178,   0}
 };
 
-short int knighttable[8][8] = {
+short int knightTableMg[8][8] = {
 {-104, -28, -25, -14,  -9, -47, -73, -166},
 {-18, -52,  -9,   4,  10,  57, -40, -89},
 {-57, -12,   3,  12,  19,  36,  70, -49},
@@ -135,7 +137,7 @@ short int knighttable[8][8] = {
 {-23, -16, -20,  -6,  23,  43, -17, -107}
 };
 
-short int knighttable2[8][8] = {
+short int knightTableEg[8][8] = {
 {-28, -41, -22, -16, -15, -21, -24, -57},
 {-41, -18,  -4,  -3,   2, -23,  -6, -37},
 {-19,  -9,  -2,  15,  19,   7, -27, -16},
@@ -146,7 +148,7 @@ short int knighttable2[8][8] = {
 {-65, -41, -22, -14, -13, -30, -52, -108}
 };
 
-short int bishoptable[8][8] = {
+short int bishopTableMg[8][8] = {
 {-33,   4,   3,  -5,  -1, -12, -24, -35},
 {-13,  24,  16,  11,   1,  34,  42,   2},
 {  1,  14,  13,   8,  30,  40, -20, -82},
@@ -157,7 +159,7 @@ short int bishoptable[8][8] = {
 {-20,   4,   8,   5,  -4,  -4, -47,  -8}
 };
 
-short int bishoptable2[8][8] = {
+short int bishopTableEg[8][8] = {
 {-17, -14, -10,  -6,  -1,   2,  -7, -13},
  {-5, -17,  -2,   0,   7,  -7,  -8, -21},
  {-8,  -8,   7,  10,   4,  -3,   5, -10},
@@ -168,7 +170,7 @@ short int bishoptable2[8][8] = {
 {-16, -24, -13,  -9,   0,   3, -14, -24}
 };
 
-short int rooktable[8][8] = {
+short int rookTableMg[8][8] = {
 {-15, -39, -41, -36, -23,  -6,  23,  28},
 {-10, -16, -25, -25, -10,  18,  28,  39},
 {  5, -19, -15, -11,   6,  25,  53,  27},
@@ -179,7 +181,7 @@ short int rooktable[8][8] = {
 {-14, -69, -33, -23, -19,  16,  43,  42}
 };
 
-short int rooktable2[8][8] = {
+short int rookTableEg[8][8] = {
 {  1,   0,   1,   7,  13,   9,   7,   6},
   {4,  -5,   3,  10,   9,   7,   8,   4},
   {4,   2,  -1,  10,  13,   6,   1,   8},
@@ -190,7 +192,7 @@ short int rooktable2[8][8] = {
 {-16,  -1, -13,  -7,   6,  -4,   0,   1}
 };
 
-short int queentable[8][8] = {
+short int queenTableMg[8][8] = {
 { -1, -31, -15,  -7, -27, -14, -21, -30},
 {-11,  -2,   6, -25, -24, -17, -37,  -3},
   {2,  15,  -9,  -5, -15,   5,  -5,  25},
@@ -201,7 +203,7 @@ short int queentable[8][8] = {
 {-47,   1,   2,  -7, -13,  47,  51,  41}
 };
 
-short int queentable2[8][8] = {
+short int queenTableEg[8][8] = {
 {-32, -20, -16, -15,   6, -19, -13, -11},
 {-25, -20, -24,  31,  25,   7,  22,  19},
 {-19, -28,  18,  23,  27,  10,  33,  18},
@@ -212,7 +214,7 @@ short int queentable2[8][8] = {
 {-40, -32,   2,  28,  29,   2,  -3,  14}
 };
 
-short int kingtable[8][8] = {
+short int kingTableMg[8][8] = {
 {-15,   2, -15, -49, -17,  -9,  29, -65},
  {39,   8, -13,   0, -20,  25,  -1,  23},
  {12, -11, -22, -27, -12,   2, -20,  16},
@@ -223,7 +225,7 @@ short int kingtable[8][8] = {
   {8,   9, -31, -55, -39, -22, -29,  13}
 };
 
-short int kingtable2[8][8] = {
+short int kingTableEg[8][8] = {
 {-54, -27, -22, -19,  -9,   8, -13, -74},
 {-40,  -8,  -3,  -5,  20,  18,  17, -35},
 {-23,   6,  12,  19,  21,  20,  15, -19},
@@ -640,13 +642,12 @@ void knight_moves(List* list, Position* board, int* key, char file, char rank, c
 }
 
 void bishop_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
-	char letterchange, numchange;
 	isattacker = false;
 	char n, i;
 	current_mobility = 0;
-	for (letterchange = -1; letterchange < 2; letterchange += 2) {
-		for (numchange = -1; numchange < 2; numchange += 2) {
-			n = file + letterchange, i = rank + numchange;
+	for (int delx = -1; delx < 2; delx += 2) {
+		for (int dely = -1; dely < 2; dely += 2) {
+			n = file + delx, i = rank + dely;
 			while (n > -1 && n < 8 && i > -1 && i < 8 && board->board[n][i] % 2 != color) {
 				if (!isgen && (((color == WHITE && i > 5) || (color == BLACK && i < 2)) ||
 					((n == 0 || board->board[n - 1][i + (-color + (color ^ 1))] != WPAWN + (color ^ 1)) &&
@@ -672,23 +673,22 @@ void bishop_moves(List* list, Position* board, int* key, char file, char rank, c
 				if (board->board[n][i] != BLANK) {
 					break;
 				}
-				n += letterchange, i += numchange;
+				n += delx, i += dely;
 			}
 		}
 	}
 }
 
 void rook_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
-	char letterchange, numchange;
 	char n, i;
 	isattacker = false;
 	current_mobility = 0;
-	for (letterchange = -1; letterchange < 2; letterchange += 1) {
-		for (numchange = -1; numchange < 2; numchange += 1) {
-			if (abs(letterchange + numchange) % 2 == 0) {
+	for (int delx = -1; delx < 2; delx += 1) {
+		for (int dely = -1; dely < 2; dely += 1) {
+			if (abs(delx + dely) % 2 == 0) {
 				continue;
 			}
-			n = file + letterchange, i = rank + numchange;
+			n = file + delx, i = rank + dely;
 			while (n > -1 && n < 8 && i > -1 && i < 8 && board->board[n][i] % 2 != color) {
 				if (!isgen && (((color == WHITE && i > 5) || (color == BLACK && i < 2)) ||
 					((n == 0 || board->board[n - 1][i + (-color + (color ^ 1))] != WPAWN + (color ^ 1)) &&
@@ -724,22 +724,21 @@ void rook_moves(List* list, Position* board, int* key, char file, char rank, cha
 				if (board->board[n][i] != BLANK) {
 					break;
 				}
-				n += letterchange, i += numchange;
+				n += delx, i += dely;
 			}
 		}
 	}
 }
 
 void queen_moves(List* list, Position* board, int* key, char file, char rank, char color, bool needscapture, bool isgen) {
-	int letterchange, numchange;
 	isattacker = false;
 	int n, i;
-	for (letterchange = -1; letterchange < 2; letterchange += 1) {
-		for (numchange = -1; numchange < 2; numchange += 1) {
-			if (letterchange == 0 && numchange == 0) {
+	for (int delx = -1; delx < 2; delx += 1) {
+		for (int dely = -1; dely < 2; dely += 1) {
+			if (delx == 0 && dely == 0) {
 				continue;
 			}
-			n = file + letterchange, i = rank + numchange;
+			n = file + delx, i = rank + dely;
 			while (n > -1 && n < 8 && i > -1 && i < 8 && board->board[n][i] % 2 != color) {
 
 				if (!isgen) {
@@ -766,10 +765,9 @@ void queen_moves(List* list, Position* board, int* key, char file, char rank, ch
 				else {
 					piece_add(list, key, file + 97, rank + '0' + 1, n + 97, i + '0' + 1, 'x', 'Q');
 				}
-				if (board->board[n][i] != BLANK) {
+				if (board->board[n][i] != BLANK)
 					break;
-				}
-				n += letterchange, i += numchange;
+				n += delx, i += dely;
 			}
 		}
 	}
@@ -835,12 +833,10 @@ void pawn_moves(List* list, Position* board, int* key, char file, char rank, cha
 
 bool check_check(Position* board, char color) {
 	int kingfile = board->kingpos[color] / 8, kingrank = board->kingpos[color] % 8;
-	int letterchange, numchange;
-	for (letterchange = -1; letterchange < 2; letterchange++) {
-		for (numchange = -1; numchange < 2; numchange++) {
-			if (letterchange == 0 && numchange == 0) {
+	for (int letterchange = -1; letterchange < 2; letterchange++) {
+		for (int numchange = -1; numchange < 2; numchange++) {
+			if (letterchange == 0 && numchange == 0)
 				continue;
-			}
 			int n = kingfile + letterchange, i = kingrank + numchange;
 			while (n > -1 && n < 8 && i > -1 && i < 8 && board->board[n][i] % 2 != color) {
 				if (board->board[n][i] % 2 == (color ^ 1)) {
@@ -972,13 +968,13 @@ void en_passant(Position* board, List* list, int* listkey, int* movelistkey, Mov
 	int file = board->epsquare % 8;
 	int rank = board->epsquare / 8;
 	int diff = color == WHITE ? 1 : -1;
-	if (file < 7 && board->board[file + 1][rank-diff] == WPAWN + color)
+	if (file < 7 && board->board[file + 1][rank - diff] == WPAWN + color)
 		pawn_add(list, listkey, file + 98, rank - diff + '1', file + 'a', rank + '1', 'x', '\0', true);
-	if (file > 0 && board->board[file - 1][rank-diff] == WPAWN + color)
-		pawn_add(list, listkey, file + 96, rank -diff+ '1', file + 'a', rank + '1', 'x', '\0', true);
+	if (file > 0 && board->board[file - 1][rank - diff] == WPAWN + color)
+		pawn_add(list, listkey, file + 96, rank - diff + '1', file + 'a', rank + '1', 'x', '\0', true);
 }
 
-void SMoveList(Position* board, List* list, MoveList* moveList, int* mkey, char color) {
+void GenerateML(Position* board, List* list, MoveList* moveList, int* mkey, char color) {
 	int key = 0;
 	for (int n = 0; n < 8; n++) {
 		for (int i = 0; i < 8; i++) {
@@ -1012,7 +1008,7 @@ void SMoveList(Position* board, List* list, MoveList* moveList, int* mkey, char 
 	en_passant(board, list, &key, mkey, moveList, color);
 }
 
-void movelistq(Position* board, List* list, MoveList* moveList, int* mkey, char color) {
+void GenerateMLCap(Position* board, List* list, MoveList* moveList, int* mkey, char color) {
 	int key = 0;
 	for (int n = 0; n < 8; n++) {
 		for (int i = 0; i < 8; i++) {
@@ -1357,7 +1353,7 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 					if (i < wbackwards[n]) {
 						wbackwards[n] = i;
 					}
-					wscore += (phase * pawntable[n][i] + (revphase)*pawntable2[n][i]) / MAXPHASE;
+					wscore += (phase * pawnTableMg[n][i] + (revphase)*pawnTableEg[n][i]) / MAXPHASE;
 					if (wdblflag) {
 						wscore += doubledpen;
 					}
@@ -1372,7 +1368,7 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 						attacksw++;
 					}
 					wscore += (bishopmobilitymg[current_mobility] * phase + bishopmobilityeg[current_mobility] * (revphase)) / MAXPHASE;
-					wscore += (bishoptable[n][i] * phase + bishoptable2[n][i] * (revphase)) / MAXPHASE;
+					wscore += (bishopTableMg[n][i] * phase + bishopTableEg[n][i] * (revphase)) / MAXPHASE;
 				}
 				else if (board->board[n][i] == WKNIGHT) {
 					knight_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
@@ -1380,7 +1376,7 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 						attacksw++;
 					}
 					wscore += (knightmobilitymg[current_mobility] * phase + knightmobilityeg[current_mobility] * (revphase)) / MAXPHASE;
-					wscore += (phase * knighttable[n][i] + (revphase)*knighttable2[n][i]) / MAXPHASE;
+					wscore += (phase * knightTableMg[n][i] + (revphase)*knightTableEg[n][i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == WROOK) {
 					rook_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
@@ -1388,14 +1384,14 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 						attacksw++;
 					}
 					wscore += (phase * rookmobilitymg[current_mobility] + (revphase)*rookmobilityeg[current_mobility]) / MAXPHASE;
-					wscore += (phase * rooktable[n][i] + (revphase)*rooktable2[n][i]) / MAXPHASE;
+					wscore += (phase * rookTableMg[n][i] + (revphase)*rookTableEg[n][i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == WQUEEN) {
 					queen_moves((List*)0, board, &dummy_key, n, i, WHITE, false, false);
 					if (isattacker) {
 						attacksw += 2;
 					}
-					wscore += (phase * queentable[n][i] + (revphase)*queentable2[n][i]) / MAXPHASE;
+					wscore += (phase * queenTableMg[n][i] + (revphase)*queenTableEg[n][i]) / MAXPHASE;
 				}
 			}
 			else if (board->board[n][i] % 2 == BLACK) {
@@ -1406,7 +1402,7 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 					if (i > bbackwards[n]) {
 						bbackwards[n] = i;
 					}
-					bscore += (phase * pawntable[n][7 - i] + (revphase)*pawntable2[n][7 - i]) / MAXPHASE;
+					bscore += (phase * pawnTableMg[n][7 - i] + (revphase)*pawnTableEg[n][7 - i]) / MAXPHASE;
 					if (bdblflag) {
 						bscore += doubledpen;
 					}
@@ -1421,7 +1417,7 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 						attacksb++;
 					}
 					bscore += (phase * bishopmobilitymg[current_mobility] + (revphase)*bishopmobilityeg[current_mobility]) / MAXPHASE;
-					bscore += (phase * bishoptable[n][7 - i] + (revphase)*bishoptable2[n][7 - i]) / MAXPHASE;
+					bscore += (phase * bishopTableMg[n][7 - i] + (revphase)*bishopTableEg[n][7 - i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == BKNIGHT) {
 
@@ -1430,7 +1426,7 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 						attacksb++;
 					}
 					bscore += (phase * knightmobilitymg[current_mobility] + (revphase)*knightmobilityeg[current_mobility]) / MAXPHASE;
-					bscore += (phase * knighttable[n][7 - i] + (revphase)*knighttable2[n][7 - i]) / MAXPHASE;
+					bscore += (phase * knightTableMg[n][7 - i] + (revphase)*knightTableEg[n][7 - i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == BROOK) {
 					rook_moves((List*)0, board, &dummy_key, n, i, BLACK, false, false);
@@ -1438,14 +1434,14 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 					if (isattacker) {
 						attacksb++;
 					}
-					bscore += (phase * rooktable[n][7 - i] + (revphase)*rooktable2[n][7 - i]) / MAXPHASE;
+					bscore += (phase * rookTableMg[n][7 - i] + (revphase)*rookTableEg[n][7 - i]) / MAXPHASE;
 				}
 				else if (board->board[n][i] == BQUEEN) {
 					queen_moves((List*)0, board, &dummy_key, n, i, BLACK, false, false);
 					if (isattacker) {
 						attacksb += 2;
 					}
-					bscore += (phase * queentable[n][7 - i] + (revphase)*queentable2[n][7 - i]) / MAXPHASE;
+					bscore += (phase * queenTableMg[n][7 - i] + (revphase)*queenTableEg[n][7 - i]) / MAXPHASE;
 
 				}
 
@@ -1524,10 +1520,10 @@ int pstscore(Position* board, int phase, short int* blockedpawns, char wbackward
 		}
 	}
 
-	wscore += (phase * kingtable[board->kingpos[0] / 8][board->kingpos[0] % 8] + (revphase)*kingtable2[board->kingpos[0] / 8][board->kingpos[0] % 8]) / MAXPHASE;
+	wscore += (phase * kingTableMg[board->kingpos[0] / 8][board->kingpos[0] % 8] + (revphase)*kingTableEg[board->kingpos[0] / 8][board->kingpos[0] % 8]) / MAXPHASE;
 
 
-	bscore += (phase * kingtable[board->kingpos[1] / 8][7 - (board->kingpos[1] % 8)] + (revphase)*kingtable2[board->kingpos[1] / 8][7 - (board->kingpos[1] % 8)]) / MAXPHASE;
+	bscore += (phase * kingTableMg[board->kingpos[1] / 8][7 - (board->kingpos[1] % 8)] + (revphase)*kingTableEg[board->kingpos[1] / 8][7 - (board->kingpos[1] % 8)]) / MAXPHASE;
 	if (king_attack_count[WHITE] > 98)
 		king_attack_count[WHITE] = 98;
 	if (king_attack_count[BLACK] > 98)
@@ -1669,7 +1665,7 @@ int eval(Position* board, char color) {
 	}
 }
 
-void movescore(Position* board, List* list, int ply, char color, char type, bool ispv, char* lastmove) {
+void movescore(Position* board, List* list, int ply, char color, char isTT, bool isPV, char* lastmove) {
 	int evl;
 	char mve[8];
 	mve[0] = '\0';
@@ -1697,7 +1693,7 @@ void movescore(Position* board, List* list, int ply, char color, char type, bool
 	int i = 0; while (list[i].move[0] != '\0') {
 		int evl;
 
-		if ((type != 'n') && !strcmp(tt[CURRENTPOS & tt_mask].bestmove, list[i].move)) {
+		if (isTT && !strcmp(tt[CURRENTPOS & tt_mask].bestmove, list[i].move)) {
 			list[i].eval = 10000;
 		}
 		else if (islower(list[i].move[0]) && list[i].move[5] == 'Q') {
@@ -1755,7 +1751,7 @@ static int CheckUp(Position* board, MoveList* moveList, int* key, char* color) {
 	return info.stop;
 }
 
-void PrintInfo(int score,int depth) {
+void PrintInfo(int score, int depth) {
 	printf("info depth %d score ", depth);
 	if (abs(score) < MATE - MAX_PLY)
 		printf("cp %d", score);
@@ -1783,17 +1779,13 @@ int SearchQuiesce(Position* board, MoveList* moveList, int* key, int alpha, int 
 	List list[LISTSIZE];
 	list[0].move[0] = '\0';
 
-	if (incheck) {
-		SMoveList(board, list, moveList, key, color);
-		//remove_illegal(board, list, color);
-	}
-	else {
-		movelistq(board, list, moveList, key, color);
-		//remove_illegal(board, list, color);
-	}
+	if (incheck)
+		GenerateML(board, list, moveList, key, color);
+	else
+		GenerateMLCap(board, list, moveList, key, color);
 
 
-	movescore(board, list, 0, color, 'n', false, moveList[*key - 2].move);
+	movescore(board, list, 0, color,false, false, moveList[*key - 2].move);
 	int i = 0;
 	bool ismove = false;
 	while (list[i].move[0] != '\0') {
@@ -1858,7 +1850,7 @@ int SearchQuiesce(Position* board, MoveList* moveList, int* key, int alpha, int 
 	return alpha;
 }
 
-int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int beta, int depth, int ply, char color, bool isnull, bool incheck) {
+static int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int beta, int depth, int ply, char color, bool isnull, bool incheck) {
 	if (CheckUp(board, moveList, key, color))
 		return 0;
 	if (ply > 0) {
@@ -1868,42 +1860,21 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 		if (beta > mate_distance)
 			beta = mate_distance;
 		if (alpha >= beta)
-				return beta;
+			return beta;
 	}
-	char type;
-	int evl;
-	if (CURRENTPOS == tt[CURRENTPOS & tt_mask].hash) {
-		type = tt[CURRENTPOS & tt_mask].type;
-		evl = tt[CURRENTPOS & tt_mask].eval;
-	}
-	else {
-		type = 'n';
-		evl = -1024;
-	}
-	bool ispv = (beta != alpha + 1);
-	if (!ispv && type != 'n' && tt[CURRENTPOS & tt_mask].depth >= depth) {
-		if (type == '0') {
-			if (evl > beta) {
-				return beta;
-			}
-			if (evl < alpha) {
-				return alpha;
-			}
-			return evl;
-		}
-		else if (type == '1') { //a move that caused a beta cutoff
-			if (evl >= beta) {
-				//don't eval any further
-				return beta;
-			}
-
-		}
-		else { //a move that didn't raise alpha
-			if (evl < alpha) {
-				return alpha;
-			}
+	bool isPV = (beta != alpha + 1);
+	bool isTT = false;
+	TTEntry *ttEntry= &tt[CURRENTPOS & tt_mask];
+	if (CURRENTPOS == ttEntry->hash) {
+		isTT = true;
+		if (!isPV && ttEntry->depth >= depth) {
+			if (ttEntry->type == EXACT)return ttEntry->eval;
+			if (ttEntry->type == LOWER && ttEntry->eval <= alpha)return ttEntry->eval;
+			if (ttEntry->type == UPPER && ttEntry->eval >= beta)return ttEntry->eval;
 		}
 	}
+	else
+		depth -= depth > 3;
 
 	if (depth <= 0) {
 		int b = SearchQuiesce(board, moveList, key, alpha, beta, 0, 15, color, incheck);
@@ -1915,17 +1886,10 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 		}
 		return b;
 	}
-	if (incheck) {
-		evl = -MATE;
-	}
-	else {
-		evl = eval(board, color);
-	}
-
-	if (depth < 9 && evl - (depth * 70) > beta) {
+	int evl = incheck?-MATE:eval(board, color);
+	if (depth < 9 && evl - (depth * 70) > beta)
 		return beta;
-	}
-	if (isnull == false && !ispv) {
+	if (isnull == false && !isPV) {
 		bool ispiecew = false, ispieceb = false;
 		for (int i = 1; i < 5; i++) {
 			if (board->pnbrqcount[WHITE][i] > 0) {
@@ -1951,18 +1915,14 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 		}
 	}
 
-	if (ispv && type == 'n') {
-		depth--;
-	}
-
 	List list[LISTSIZE];
 	list[0].move[0] = '\0';
-	bool ismove = false;
+	int legalMoves = 0;
 	bool firstmove = true;
 	int betacount = 0;
-	SMoveList(board, list, moveList, key, color);
+	GenerateML(board, list, moveList, key, color);
 	//remove_illegal(board, list, color);
-	movescore(board, list, ply, color, type, ispv, moveList[*key - 2].move);
+	movescore(board, list, ply, color, isTT, isPV, moveList[*key - 2].move);
 	int i = 0;
 	unsigned long long int original_pos = CURRENTPOS;
 	bool raisedalpha = false;
@@ -1970,7 +1930,7 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 	pvstack[pvptr++][0] = '\0';
 	char bestmove[8];
 	bool _fprune = false;
-	if (depth < 5 && !incheck && !ispv && alpha > -MATE && evl + (futility[depth - 1]) < alpha && (depth < 4 || type == 'n')) {
+	if (depth < 5 && !incheck && !isPV && alpha > -MATE && evl + (futility[depth - 1]) < alpha && (depth < 4 || !isTT)) {
 		_fprune = true;
 	}
 
@@ -1990,9 +1950,9 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 			i++;
 			continue;
 		}
-		ismove = true;
+		legalMoves++;
 		bool iscap = strchr(list[i].move, 'x');
-		if (!iscap && !ispv && depth < 4) {
+		if (!iscap && !isPV && depth < 4) {
 			numquiets++;
 			if (numquiets >= futility_move_count && ply > 0) {
 				movecountprune = true;
@@ -2010,7 +1970,7 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 		}
 		move_add(&board2, moveList, key, list[i].move, color);
 
-		if (ispv == true && firstmove)
+		if (isPV == true && firstmove)
 			list[i].eval = -SearchAlpha(&board2, moveList, key, -beta, -alpha, depth - 1, ply + 1, color ^ 1, false, ischeck);
 
 		else {
@@ -2026,7 +1986,7 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 				else {
 					R = (int)round(log(depth) * log(betacount + 1) / 1.95);
 				}
-				if (!ispv) {
+				if (!isPV) {
 					R += 1;
 				}
 			}
@@ -2038,7 +1998,7 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 			if (list[i].eval > alpha && R > 0)
 				list[i].eval = -SearchAlpha(&board2, moveList, key, -alpha - 1, -alpha, depth - 1, ply + 1, color ^ 1, false, ischeck);
 
-			if (list[i].eval > alpha && ispv) {
+			if (list[i].eval > alpha && isPV) {
 				if (R > 0) {
 					R = 0;
 				}
@@ -2054,7 +2014,7 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 				memcpy(currentmove, list[i].move, 8);
 			}
 			memcpy(bestmove, list[i].move, 8);
-			TTInsert(original_pos, depth, beta, '1', bestmove);
+			TTInsert(original_pos, depth, beta, UPPER, bestmove);
 			total++;
 			if (betacount < 5)
 				betas++;
@@ -2117,10 +2077,9 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 		betacount++;
 		moveList[*key - 1].move[0] = '\0';
 		*key = *key - 1;
-		if (alpha<list[i].eval) {
-			if (ply == 0) {
+		if (alpha < list[i].eval) {
+			if (ply == 0)
 				memcpy(currentmove, list[i].move, 8);
-			}
 			raisedalpha = true;
 			alpha = list[i].eval;
 			memcpy(bestmove, list[i].move, 8);
@@ -2133,7 +2092,7 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 		}
 
 		else if (firstmove && ply == 0) {
-			TTInsert(original_pos, depth, alpha, '2', list[i].move);
+			TTInsert(original_pos, depth, alpha, LOWER, list[i].move);
 			CURRENTPOS = original_pos;
 			pvptr = pvstart;
 			return alpha;
@@ -2147,20 +2106,14 @@ int SearchAlpha(Position* board, MoveList* moveList, int* key, int alpha, int be
 	}
 
 	pvptr = pvstart;
-	if (!ismove) {
-		if (incheck) {
-			return ply - MATE;
-		}
-		else {
-			return 0;
-		}
-	}
-	if (raisedalpha) 
-		TTInsert(original_pos, depth, alpha, '0', bestmove);
+	if (!legalMoves)
+		return incheck ? ply - MATE : 0;
+	if (raisedalpha)
+		TTInsert(original_pos, depth, alpha, EXACT, bestmove);
 	else {
 		char j[8];
 		j[0] = '\0';
-		TTInsert(original_pos, depth, alpha, '2', j);
+		TTInsert(original_pos, depth, alpha, LOWER, j);
 	}
 	return alpha;
 }
@@ -2288,7 +2241,7 @@ static void SetFen(Position* board, MoveList* moveList, int* key, char* color, c
 	if (fenstring[fenkey] == '-')
 		board->epsquare = -1;
 	else {
-		board->epsquare = (fenstring[fenkey] - 'a') + (fenstring[fenkey+1] - '1') * 8;
+		board->epsquare = (fenstring[fenkey] - 'a') + (fenstring[fenkey + 1] - '1') * 8;
 		fenkey++;
 	}
 	fenkey++;
