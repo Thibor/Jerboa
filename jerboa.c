@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -24,19 +25,29 @@
 #define NAME "Jerboa"
 #define VERSION "2026-07-30"
 #define START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+#define FLIP(sp) ((sp)^0x38)
+#define ABSSQ(sq,blackTurn) ((blackTurn) ? FLIP(sq) : (sq))
 
-/* define the piece type: empty, pawn, knight, bishop, rook, queen, king */
-typedef enum TPieceType { EMPTY, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, PT_NB } TPieceType;
-typedef enum Bound { UPPER, LOWER, EXACT } Bound;
-enum {CASTLE_WK = 0b0001, CASTLE_WQ = 0b0010, CASTLE_BK = 0b0100, CASTLE_BQ = 0b1000};
+typedef enum { EMPTY, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, PT_NB }TPieceType;
+typedef enum { UPPER, LOWER, EXACT } Bound;
+enum { CASTLE_WK = 0b0001, CASTLE_WQ = 0b0010, CASTLE_BK = 0b0100, CASTLE_BQ = 0b1000 };
 /* define the move type, for example
    KING|CASTLE is a castle move
    PAWN|CAPTURE|EP is an enpassant move
    PAWN|PROMO|CAPTURE is a promotion with a capture */
 typedef enum { CASTLE = 0x40, PROMO = 0x20, EP = 0x10, CAPTURE = 0x08 } TMoveType;
-
-/* bitboard types */
-typedef uint64_t TBB;
+typedef enum {
+	SQ_A1, SQ_B1, SQ_C1, SQ_D1, SQ_E1, SQ_F1, SQ_G1, SQ_H1,
+	SQ_A2, SQ_B2, SQ_C2, SQ_D2, SQ_E2, SQ_F2, SQ_G2, SQ_H2,
+	SQ_A3, SQ_B3, SQ_C3, SQ_D3, SQ_E3, SQ_F3, SQ_G3, SQ_H3,
+	SQ_A4, SQ_B4, SQ_C4, SQ_D4, SQ_E4, SQ_F4, SQ_G4, SQ_H4,
+	SQ_A5, SQ_B5, SQ_C5, SQ_D5, SQ_E5, SQ_F5, SQ_G5, SQ_H5,
+	SQ_A6, SQ_B6, SQ_C6, SQ_D6, SQ_E6, SQ_F6, SQ_G6, SQ_H6,
+	SQ_A7, SQ_B7, SQ_C7, SQ_D7, SQ_E7, SQ_F7, SQ_G7, SQ_H7,
+	SQ_A8, SQ_B8, SQ_C8, SQ_D8, SQ_E8, SQ_F8, SQ_G8, SQ_H8,
+	SQ_NONE,
+	SQ_NB = 64
+}Square;
 
 typedef struct {
 	U8 post;
@@ -52,10 +63,10 @@ typedef struct {
 typedef union
 {
 	struct {
-		uint8_t MoveType;
-		uint8_t From;
-		uint8_t To;
-		uint8_t Prom;
+		U8 from;
+		U8 to;
+		U8 promo;
+		U8 flag;
 	};
 	unsigned int Move;
 }TMove;
@@ -67,18 +78,19 @@ PM,P0,P1,P2 are the 4 bitboards that contain the whole board
 PM is the bitboard with the side to move pieces
 P0,P1 and P2: with these bitboards you can obtain every type of pieces and every pieces combinations.
 */
-typedef struct{
-	TBB PM;
-	TBB P0;
-	TBB P1;
-	TBB P2;
-	uint8_t castleFlags; /* ..sl..SL  short long opponent SHORT LONG side to move */
-	uint8_t enPassant; /* enpassant column, =8 if not set */
-	uint8_t move50; /* 50 move rule counter */
-	uint8_t STM; /* side to move */
-} TBoard;
+typedef struct {
+	U64 PM;
+	U64 P0;
+	U64 P1;
+	U64 P2;
+	U8 castleFlags; /* ..sl..SL  short long opponent SHORT LONG side to move */
+	U8 enPassant; /* enpassant column, =8 if not set */
+	U8 move50; /* 50 move rule counter */
+	U8 STM; /* side to move */
+} Position;
 
 typedef struct {
+	S16 score;
 	TMove move;
 	TMove killer1;
 	TMove killer2;
@@ -92,92 +104,198 @@ typedef struct {
 	U8 flag;
 }TTEntry;
 
-/*
-Into Game are saved all the positions from the last 50 move counter reset
-Position is the pointer to the last position of the game
-*/
-TBoard Game[512];
-TBoard* position;
+typedef struct {
+	U64 hash;
+	S16 score;
+} TTEntryEval;
+
+Position position;
 
 U64 keys[KEY_SIZE];
-const int StaticValue[8] = { 0,100,300,300,500,950,0,0 };
 Stack ss[128];
 int hh[2][64][64];
-TTEntry tt[TT_SIZE];
+TTEntry* tt;
+TTEntryEval* ttEval;
 int historyCount = 0;
 U64 historyHash[1024];
+U64 ttSize;
+U64 ttMask;
 
-/* Piece Square Tables */
-const int PST[8][64] =
-{
-{  0,  0,  0,  0,  0,  0,  0,  0, /* empty */
-   0,  0,  0,  0,  0,  0,  0,  0,
-   0,  0,  0,  0,  0,  0,  0,  0,
-   0,  0,  0,  0,  0,  0,  0,  0,
-   0,  0,  0,  0,  0,  0,  0,  0,
-   0,  0,  0,  0,  0,  0,  0,  0,
-   0,  0,  0,  0,  0,  0,  0,  0,
-   0,  0,  0,  0,  0,  0,  0,  0},
-{  0,  0,  0,  0,  0,  0,  0,  0, /* pawn */
-   5,  5,  5,-20,-20,  5,  5,  5,
-   5, -5, -5,  0,  0, -5, -5,  5,
-   0,  0,  0, 12, 12,  0,  0,  0,
-  10, 10, 10, 16, 16, 10, 10, 10,
-  30, 30, 30, 40, 40, 30, 30, 30,
- 100,100,100,100,100,100,100,100,
-   0,  0,  0,  0,  0,  0,  0,  0},
-{ -5, -5,  0,  0,  0,  0, -5, -5,  /* knight */
-  -5,  0, 10, 10, 10, 10,  0, -5,
-   0, 10, 15, 15, 15, 15, 10,  0,
-   0, 10, 15, 20, 20, 15, 10,  0,
-   0, 10, 15, 20, 20, 15, 10,  0,
-   0, 10, 15, 15, 15, 15, 10,  0,
-  -5,  0, 10, 10, 10, 10,  0, -5,
-  -5, -5,  0,  0,  0,  0, -5, -5},
-{ -5, -5,  0,  0,  0,  0, -5, -5,  /* bishop */
-  -5,  0, 10, 10, 10, 10,  0, -5,
-  -5, 10, 15, 15, 15, 15, 10, -5,
-  -5, 10, 15, 20, 20, 15, 10, -5,
-  -5, 10, 15, 20, 20, 15, 10, -5,
-  -5, 10, 15, 15, 15, 15, 10, -5,
-  -5,  0, 10, 10, 10, 10,  0, -5,
-  -5, -5,  0,  0,  0,  0, -5, -5},
-{  0, -5, -5, 10, 10, -5, -5,  0, /* rook */
-   0,  0,  0, 10, 10,  0,  0,  0,
-   0,  0,  0, 10, 10,  0,  0,  0,
-   0,  0,  0, 10, 10,  0,  0,  0,
-   0,  0,  0, 10, 10,  0,  0,  0,
-   0,  0,  0, 10, 10,  0,  0,  0,
-  20, 20, 20, 20, 20, 20, 20, 20,
-  10, 10, 10, 10, 10, 10, 10, 10},
-{ -4, -4, -4, -4, -4, .4, -4, -4,  /* queen */
-  -4,  0,  0,  0,  0,  0,  0, -4,
-  -4,  0,  4,  4,  4,  4,  0, -4,
-  -4,  0,  4,  8,  8,  4,  0, -4,
-  -4,  0,  4,  8,  8,  4,  0, -4,
-  -4,  0,  4,  4,  4,  4,  0, -4,
-  -4,  0,  0,  0,  0,  0,  0, -4,
-  -4, -4, -4, -4, -4, -4, -4, -4},
-{ -5, 25, 15,-10,  0,-10, 30, -5, /* king middlegame */
-  -5, -5, -5, -5, -5, -5, -5, -5,
-  -5, -5, -5, -5, -5, -5, -5, -5,
-  -5, -5, -5, -5, -5, -5, -5, -5,
-  -5, -5, -5, -5, -5, -5, -5, -5,
-  -5, -5, -5, -5, -5, -5, -5, -5,
-  -5, -5, -5, -5, -5, -5, -5, -5,
-  -5, -5, -5, -5, -5, -5, -5, -5},
-{  0, -5, -5,  0,  0,  0, -5,  0, /* king endgame */
-   0,  5,  5,  5,  5,  5,  5,  0,
-   0,  5, 10, 10, 10, 10,  5,  0,
-   0,  5, 10, 15, 15, 10,  5,  0,
-   0,  5, 10, 15, 15, 10,  5,  0,
-   0,  5, 10, 10, 10, 10,  5,  0,
-   0,  5,  5,  5,  5,  5,  5,  0,
-   0,  0,  0,  0,  0,  0,  0,  0}
+int phaseVal[PT_NB] = { 0,0,1,1,2,4,0 };
+int insufVal[PT_NB] = { 0,3,1,2,3,3,0 };
+
+int mg_material[PT_NB] = { 0, 82, 337, 365, 477, 1025, 0 };
+int eg_material[PT_NB] = { 0, 94, 281, 297, 512,  936, 0 };
+int mx_material[PT_NB] = { 0, 94, 337, 365, 512, 1025, 0 };
+
+int boardCastle[64] = {
+	 7, 15, 15, 15,  3, 15, 15, 11,
+	15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15,
+	13, 15, 15, 15, 12, 15, 15, 14
+};
+int empty_table[64];
+int mg_pawn_table[64] = {
+	  0,   0,   0,   0,   0,   0,  0,   0,
+	 98, 134,  61,  95,  68, 126, 34, -11,
+	 -6,   7,  26,  31,  65,  56, 25, -20,
+	-14,  13,   6,  21,  23,  12, 17, -23,
+	-27,  -2,  -5,  12,  17,   6, 10, -25,
+	-26,  -4,  -4, -10,   3,   3, 33, -12,
+	-35,  -1, -20, -23, -15,  24, 38, -22,
+	  0,   0,   0,   0,   0,   0,  0,   0,
 };
 
+int eg_pawn_table[64] = {
+	  0,   0,   0,   0,   0,   0,   0,   0,
+	178, 173, 158, 134, 147, 132, 165, 187,
+	 94, 100,  85,  67,  56,  53,  82,  84,
+	 32,  24,  13,   5,  -2,   4,  17,  17,
+	 13,   9,  -3,  -7,  -7,  -8,   3,  -1,
+	  4,   7,  -6,   1,   0,  -5,  -1,  -8,
+	 13,   8,   8,  10,  13,   0,   2,  -7,
+	  0,   0,   0,   0,   0,   0,   0,   0,
+};
+
+int mg_knight_table[64] = {
+	-167, -89, -34, -49,  61, -97, -15, -107,
+	 -73, -41,  72,  36,  23,  62,   7,  -17,
+	 -47,  60,  37,  65,  84, 129,  73,   44,
+	  -9,  17,  19,  53,  37,  69,  18,   22,
+	 -13,   4,  16,  13,  28,  19,  21,   -8,
+	 -23,  -9,  12,  10,  19,  17,  25,  -16,
+	 -29, -53, -12,  -3,  -1,  18, -14,  -19,
+	-105, -21, -58, -33, -17, -28, -19,  -23,
+};
+
+int eg_knight_table[64] = {
+	-58, -38, -13, -28, -31, -27, -63, -99,
+	-25,  -8, -25,  -2,  -9, -25, -24, -52,
+	-24, -20,  10,   9,  -1,  -9, -19, -41,
+	-17,   3,  22,  22,  22,  11,   8, -18,
+	-18,  -6,  16,  25,  16,  17,   4, -18,
+	-23,  -3,  -1,  15,  10,  -3, -20, -22,
+	-42, -20, -10,  -5,  -2, -20, -23, -44,
+	-29, -51, -23, -15, -22, -18, -50, -64,
+};
+
+int mg_bishop_table[64] = {
+	-29,   4, -82, -37, -25, -42,   7,  -8,
+	-26,  16, -18, -13,  30,  59,  18, -47,
+	-16,  37,  43,  40,  35,  50,  37,  -2,
+	 -4,   5,  19,  50,  37,  37,   7,  -2,
+	 -6,  13,  13,  26,  34,  12,  10,   4,
+	  0,  15,  15,  15,  14,  27,  18,  10,
+	  4,  15,  16,   0,   7,  21,  33,   1,
+	-33,  -3, -14, -21, -13, -12, -39, -21,
+};
+
+int eg_bishop_table[64] = {
+	-14, -21, -11,  -8, -7,  -9, -17, -24,
+	 -8,  -4,   7, -12, -3, -13,  -4, -14,
+	  2,  -8,   0,  -1, -2,   6,   0,   4,
+	 -3,   9,  12,   9, 14,  10,   3,   2,
+	 -6,   3,  13,  19,  7,  10,  -3,  -9,
+	-12,  -3,   8,  10, 13,   3,  -7, -15,
+	-14, -18,  -7,  -1,  4,  -9, -15, -27,
+	-23,  -9, -23,  -5, -9, -16,  -5, -17,
+};
+
+int mg_rook_table[64] = {
+	 32,  42,  32,  51, 63,  9,  31,  43,
+	 27,  32,  58,  62, 80, 67,  26,  44,
+	 -5,  19,  26,  36, 17, 45,  61,  16,
+	-24, -11,   7,  26, 24, 35,  -8, -20,
+	-36, -26, -12,  -1,  9, -7,   6, -23,
+	-45, -25, -16, -17,  3,  0,  -5, -33,
+	-44, -16, -20,  -9, -1, 11,  -6, -71,
+	-19, -13,   1,  17, 16,  7, -37, -26,
+};
+
+int eg_rook_table[64] = {
+	13, 10, 18, 15, 12,  12,   8,   5,
+	11, 13, 13, 11, -3,   3,   8,   3,
+	 7,  7,  7,  5,  4,  -3,  -5,  -3,
+	 4,  3, 13,  1,  2,   1,  -1,   2,
+	 3,  5,  8,  4, -5,  -6,  -8, -11,
+	-4,  0, -5, -1, -7, -12,  -8, -16,
+	-6, -6,  0,  2, -9,  -9, -11,  -3,
+	-9,  2,  3, -1, -5, -13,   4, -20,
+};
+
+int mg_queen_table[64] = {
+	-28,   0,  29,  12,  59,  44,  43,  45,
+	-24, -39,  -5,   1, -16,  57,  28,  54,
+	-13, -17,   7,   8,  29,  56,  47,  57,
+	-27, -27, -16, -16,  -1,  17,  -2,   1,
+	 -9, -26,  -9, -10,  -2,  -4,   3,  -3,
+	-14,   2, -11,  -2,  -5,   2,  14,   5,
+	-35,  -8,  11,   2,   8,  15,  -3,   1,
+	 -1, -18,  -9,  10, -15, -25, -31, -50,
+};
+
+int eg_queen_table[64] = {
+	 -9,  22,  22,  27,  27,  19,  10,  20,
+	-17,  20,  32,  41,  58,  25,  30,   0,
+	-20,   6,   9,  49,  47,  35,  19,   9,
+	  3,  22,  24,  45,  57,  40,  57,  36,
+	-18,  28,  19,  47,  31,  34,  39,  23,
+	-16, -27,  15,   6,   9,  17,  10,   5,
+	-22, -23, -30, -16, -16, -23, -36, -32,
+	-33, -28, -22, -43,  -5, -32, -20, -41,
+};
+
+int mg_king_table[64] = {
+	-65,  23,  16, -15, -56, -34,   2,  13,
+	 29,  -1, -20,  -7,  -8,  -4, -38, -29,
+	 -9,  24,   2, -16, -20,   6,  22, -22,
+	-17, -20, -12, -27, -30, -25, -14, -36,
+	-49,  -1, -27, -39, -46, -44, -33, -51,
+	-14, -14, -22, -46, -44, -30, -15, -27,
+	  1,   7,  -8, -64, -43, -16,   9,   8,
+	-15,  36,  12, -54,   8, -28,  24,  14,
+};
+
+int eg_king_table[64] = {
+	-74, -35, -18, -18, -11,  15,   4, -17,
+	-12,  17,  14,  17,  17,  38,  23,  11,
+	 10,  17,  23,  15,  20,  45,  44,  13,
+	 -8,  22,  24,  27,  26,  33,  26,   3,
+	-18,  -4,  21,  24,  27,  23,   9, -11,
+	-19,  -3,  11,  21,  23,  16,   7,  -9,
+	-27, -11,   4,  13,  14,   4,  -5, -17,
+	-53, -34, -21, -11, -28, -14, -24, -43
+};
+
+int* mg_table[PT_NB] = {
+	empty_table,
+	mg_pawn_table,
+	mg_knight_table,
+	mg_bishop_table,
+	mg_rook_table,
+	mg_queen_table,
+	mg_king_table
+};
+
+int* eg_table[PT_NB] = {
+	empty_table,
+	eg_pawn_table,
+	eg_knight_table,
+	eg_bishop_table,
+	eg_rook_table,
+	eg_queen_table,
+	eg_king_table
+};
+
+int mg_pst[PT_NB][64];
+int eg_pst[PT_NB][64];
+
 /* array of bitboards that contains all the knight destination for every square */
-const TBB KnightDest[64] = { 0x0000000000020400ULL,0x0000000000050800ULL,0x00000000000a1100ULL,0x0000000000142200ULL,
+const U64 KnightDest[64] = { 0x0000000000020400ULL,0x0000000000050800ULL,0x00000000000a1100ULL,0x0000000000142200ULL,
 						   0x0000000000284400ULL,0x0000000000508800ULL,0x0000000000a01000ULL,0x0000000000402000ULL,
 						   0x0000000002040004ULL,0x0000000005080008ULL,0x000000000a110011ULL,0x0000000014220022ULL,
 						   0x0000000028440044ULL,0x0000000050880088ULL,0x00000000a0100010ULL,0x0000000040200020ULL,
@@ -194,7 +312,7 @@ const TBB KnightDest[64] = { 0x0000000000020400ULL,0x0000000000050800ULL,0x00000
 						   0x0004020000000000ULL,0x0008050000000000ULL,0x00110a0000000000ULL,0x0022140000000000ULL,
 						   0x0044280000000000ULL,0x0088500000000000ULL,0x0010a00000000000ULL,0x0020400000000000ULL };
 /* The same for the king */
-const TBB KingDest[64] = { 0x0000000000000302ULL,0x0000000000000705ULL,0x0000000000000e0aULL,0x0000000000001c14ULL,
+const U64 KingDest[64] = { 0x0000000000000302ULL,0x0000000000000705ULL,0x0000000000000e0aULL,0x0000000000001c14ULL,
 						  0x0000000000003828ULL,0x0000000000007050ULL,0x000000000000e0a0ULL,0x000000000000c040ULL,
 						  0x0000000000030203ULL,0x0000000000070507ULL,0x00000000000e0a0eULL,0x00000000001c141cULL,
 						  0x0000000000382838ULL,0x0000000000705070ULL,0x0000000000e0a0e0ULL,0x0000000000c040c0ULL,
@@ -212,13 +330,13 @@ const TBB KingDest[64] = { 0x0000000000000302ULL,0x0000000000000705ULL,0x0000000
 						  0x2838000000000000ULL,0x5070000000000000ULL,0xa0e0000000000000ULL,0x40c0000000000000ULL };
 
 /* masks for finding the pawns that can capture with an enpassant (in move generation) */
-const TBB enPassant[8] = {
+const U64 enPassant[8] = {
 0x0000000200000000ULL,0x0000000500000000ULL,0x0000000A00000000ULL,0x0000001400000000ULL,
 0x0000002800000000ULL,0x0000005000000000ULL,0x000000A000000000ULL,0x0000004000000000ULL
 };
 
 /* masks for finding the pawns that can capture with an enpassant (in make move) */
-const TBB EnPassantM[8] = {
+const U64 EnPassantM[8] = {
 0x0000000002000000ULL,0x0000000005000000ULL,0x000000000A000000ULL,0x0000000014000000ULL,
 0x0000000028000000ULL,0x0000000050000000ULL,0x00000000A0000000ULL,0x0000000040000000ULL
 };
@@ -290,65 +408,55 @@ unsigned long __inline LSB(unsigned __int64 value)
    CastleSO: short castling opponent
    CastleLO: long castling opponent
  */
-#define CastleMK (position->castleFlags & CASTLE_WK)
-#define CastleMQ (position->castleFlags & CASTLE_WQ)
-#define CastleEK (position->castleFlags & CASTLE_BK)
-#define CastleEQ (position->castleFlags & CASTLE_BQ)
-#define ResetCastleMK (position->castleFlags &= ~CASTLE_WK)
-#define ResetCastleMQ (position->castleFlags &= ~CASTLE_WQ)
-#define ResetCastleEK (position->castleFlags &= ~CASTLE_BK)
-#define ResetCastleEQ (position->castleFlags &= ~CASTLE_BQ)
+ //#define CastleMK (position->castleFlags & CASTLE_WK)
+ //#define CastleMQ (position->castleFlags & CASTLE_WQ)
+ //#define CastleEK (position->castleFlags & CASTLE_BK)
+ //#define CastleEQ (position->castleFlags & CASTLE_BQ)
+ //#define ResetCastleMK (position->castleFlags &= ~CASTLE_WK)
+ //#define ResetCastleMQ (position->castleFlags &= ~CASTLE_WQ)
+ //#define ResetCastleEK (position->castleFlags &= ~CASTLE_BK)
+ //#define ResetCastleEQ (position->castleFlags &= ~CASTLE_BQ)
 
- /* these Macros are used to calculate the bitboard of a particular kind of piece
+  /* these Macros are used to calculate the bitboard of a particular kind of piece
 
-	P2 P1 P0
-	 0  0  0    empty
-	 0  0  1    pawn
-	 0  1  0    knight
-	 0  1  1    bishop
-	 1  0  0    rook
-	 1  0  1    queen
-	 1  1  0    king
- */
-#define Occupation (position->P0 | position->P1 | position->P2) /* board occupation */
-#define Pawns (position->P0 & ~position->P1 & ~position->P2) /* all the pawns on the board */
-#define Knights (~position->P0 & position->P1 & ~position->P2)
-#define Bishops (position->P0 & position->P1)
-#define Rooks (~position->P0 & ~position->P1 & position->P2)
-#define Queens (position->P0 & position->P2)
-#define Kings (position->P1 & position->P2) /* a bitboard with the 2 kings */
+	 P2 P1 P0
+	  0  0  0    empty
+	  0  0  1    pawn
+	  0  1  0    knight
+	  0  1  1    bishop
+	  1  0  0    rook
+	  1  0  1    queen
+	  1  1  0    king
+  */
+static inline U64 Occupation(Position* pos) { return pos->P0 | pos->P1 | pos->P2; }
+static inline U64 Pawns(Position* pos) { return pos->P0 & ~pos->P1 & ~pos->P2; }
+static inline U64 Knights(Position* pos) { return ~pos->P0 & pos->P1 & ~pos->P2; }
+static inline U64 Bishops(Position* pos) { return pos->P0 & pos->P1; }
+static inline U64 Rooks(Position* pos) { return ~pos->P0 & ~pos->P1 & pos->P2; }
+static inline U64 Queens(Position* pos) { return pos->P0 & pos->P2; }
+static inline U64 Kings(Position* pos) { return pos->P1 & pos->P2; }
+static inline U64 GetTimeMs() { return GetTickCount64(); }
+static inline int PieceType(Position* pos, int sq) { return ((pos->P2 >> (sq)) & 1) << 2 | ((pos->P1 >> (sq)) & 1) << 1 | ((pos->P0 >> (sq)) & 1); }
+static inline void TTClear() { memset(tt, 0, sizeof(TTEntry) * ttSize); }
+static inline void HHClear() { memset(hh, 0, sizeof(hh)); }
+static inline void SSClear() { memset(ss, 0, sizeof(ss)); }
 
- /* get the piece type giving the square */
-#define Piece(sq) (((position->PM>>(sq))&1)<<3 | ((position->P2>>(sq))&1)<<2 | ((position->P1>>(sq))&1)<<1 | ((position->P0>>(sq))&1))
-#define PieceType(sq) (((position->P2>>(sq))&1)<<2 | ((position->P1>>(sq))&1)<<1 | ((position->P0>>(sq))&1))
-
-/* calculate the square related to the opponent */
-#define OppSq(sp) ((sp)^0x38)
-/* Absolute Square, we need this macro to return the move in long algebric notation  */
-#define AbsSq(sq,col) ((col)==WHITE ? (sq):OppSq(sq))
+void UciCommand(Position* pos, char* str);
 
 /*
 The board is always saved with the side to move in the lower part of the bitboards to use the same generation and
 make for the Black and the White side.
 This needs the inversion of the 4 bitboards, roll the Castle rights and update the side to move.
 */
-#define ChangeSide \
-do{ \
-   position->PM^=Occupation; /* update the side to move pieces */\
-   position->PM=RevBB(position->PM);\
-   position->P0=RevBB(position->P0);\
-   position->P1=RevBB(position->P1);\
-   position->P2=RevBB(position->P2);/* reverse the board */\
-   position->castleFlags = (position->castleFlags>>2)|((position->castleFlags<<2)&0b1100);/* roll the castle rights */\
-   position->STM ^= BLACK; /* change the side to move */\
-}while(0)
-
-static inline void TTClear() { memset(tt, 0, sizeof(tt)); }
-static inline void HHClear() { memset(hh, 0, sizeof(hh)); }
-static inline void SSClear() { memset(ss, 0, sizeof(ss)); }
-static inline U64 GetTimeMs() { return GetTickCount64(); }
-
-void UciCommand(char* str);
+static void FlipPosition(Position* pos) {
+	pos->PM ^= Occupation(pos);
+	pos->PM = RevBB(pos->PM);
+	pos->P0 = RevBB(pos->P0);
+	pos->P1 = RevBB(pos->P1);
+	pos->P2 = RevBB(pos->P2);
+	pos->castleFlags = ((pos->castleFlags >> 2) | (pos->castleFlags << 2)) & 0xf;
+	pos->STM ^= BLACK;
+}
 
 static int InputAvailable(void) {
 	static int init = 0, pipe;
@@ -374,7 +482,7 @@ static int InputAvailable(void) {
 	}
 }
 
-static int CheckUp() {
+static int CheckUp(Position* pos) {
 	if ((++info.nodes & 0xffff) == 0) {
 		if (info.timeLimit && GetTimeMs() - info.timeStart > info.timeLimit)
 			info.stop = TRUE;
@@ -383,46 +491,46 @@ static int CheckUp() {
 		if (InputAvailable()) {
 			char str[4000];
 			fgets(str, sizeof(str), stdin);
-			UciCommand(str);
+			UciCommand(pos, str);
 		}
 	}
 	return info.stop;
 }
 
 /* get the corresponding string to the given move  */
-static inline void MoveToStr(char* strmove, TMove move, uint8_t tomove)
+static inline void MoveToStr(char* strmove, TMove move, U8 color)
 {
 	const char promo[7] = "\0\0nbrq";
-	strmove[0] = 'a' + AbsSq(move.From, tomove) % 8;
-	strmove[1] = '1' + AbsSq(move.From, tomove) / 8;
-	strmove[2] = 'a' + AbsSq(move.To, tomove) % 8;
-	strmove[3] = '1' + AbsSq(move.To, tomove) / 8;
-	strmove[4] = promo[move.Prom];
+	strmove[0] = 'a' + ABSSQ(move.from, color) % 8;
+	strmove[1] = '1' + ABSSQ(move.from, color) / 8;
+	strmove[2] = 'a' + ABSSQ(move.to, color) % 8;
+	strmove[3] = '1' + ABSSQ(move.to, color) / 8;
+	strmove[4] = promo[move.promo];
 	strmove[5] = '\0';
 }
 
 /* get the corresponding move to the given string */
-static inline TMove StrToMove(char* strmove)
+static inline TMove StrToMove(Position* pos, char* strmove)
 {
 	TMove move;
-	move.From = AbsSq((uint8_t)(strmove[0] - 'a' + (strmove[1] - '1') * 8), position->STM);
-	move.To = AbsSq((uint8_t)(strmove[2] - 'a' + (strmove[3] - '1') * 8), position->STM);
-	move.Prom = EMPTY;
-	if (strmove[4] == 'n') move.Prom = KNIGHT;
-	else if (strmove[4] == 'b') move.Prom = BISHOP;
-	else if (strmove[4] == 'r') move.Prom = ROOK;
-	else if (strmove[4] == 'q') move.Prom = QUEEN;
-	move.MoveType = PieceType(move.From);
-	if (move.MoveType == PAWN) {
-		if ((1ULL << move.To) & 0xFF00000000000000ULL)
-			move.MoveType |= PROMO;
-		else if (position->enPassant != 8 && move.To == (40 + position->enPassant))
-			move.MoveType = PAWN | EP | CAPTURE;
+	move.from = ABSSQ((U8)(strmove[0] - 'a' + (strmove[1] - '1') * 8), pos->STM);
+	move.to = ABSSQ((U8)(strmove[2] - 'a' + (strmove[3] - '1') * 8), pos->STM);
+	move.promo = EMPTY;
+	if (strmove[4] == 'n') move.promo = KNIGHT;
+	else if (strmove[4] == 'b') move.promo = BISHOP;
+	else if (strmove[4] == 'r') move.promo = ROOK;
+	else if (strmove[4] == 'q') move.promo = QUEEN;
+	move.flag = PieceType(pos, move.from);
+	if (move.flag == PAWN) {
+		if ((1ULL << move.to) & 0xFF00000000000000ULL)
+			move.flag |= PROMO;
+		else if (pos->enPassant != 8 && move.to == (40 + pos->enPassant))
+			move.flag = PAWN | EP | CAPTURE;
 	}
-	else if (move.MoveType == KING && (move.To - move.From == 2 || move.From - move.To == 2))
-		move.MoveType = KING | CASTLE;
-	if (PieceType(move.To))
-		move.MoveType |= CAPTURE;
+	else if (move.flag == KING && (move.to - move.from == 2 || move.from - move.to == 2))
+		move.flag = KING | CASTLE;
+	if (PieceType(pos, move.to))
+		move.flag |= CAPTURE;
 	return move;
 }
 
@@ -438,14 +546,14 @@ static void InitHash() {
 }
 
 /* return the bitboard with the rook destinations */
-static inline TBB GenRook(uint64_t sq, TBB occupation)
+static inline U64 GenRook(uint64_t sq, U64 occupation)
 {
-	TBB piece = 1ULL << sq;
+	U64 piece = 1ULL << sq;
 	occupation ^= piece; /* remove the selected piece from the occupation */
-	TBB piecesup = (0x0101010101010101ULL << sq) & (occupation | 0xFF00000000000000ULL); /* find the pieces up */
-	TBB piecesdo = (0x8080808080808080ULL >> (63 - sq)) & (occupation | 0x00000000000000FFULL); /* find the pieces down */
-	TBB piecesri = (0x00000000000000FFULL << sq) & (occupation | 0x8080808080808080ULL); /* find pieces on the right */
-	TBB piecesle = (0xFF00000000000000ULL >> (63 - sq)) & (occupation | 0x0101010101010101ULL); /* find pieces on the left */
+	U64 piecesup = (0x0101010101010101ULL << sq) & (occupation | 0xFF00000000000000ULL); /* find the pieces up */
+	U64 piecesdo = (0x8080808080808080ULL >> (63 - sq)) & (occupation | 0x00000000000000FFULL); /* find the pieces down */
+	U64 piecesri = (0x00000000000000FFULL << sq) & (occupation | 0x8080808080808080ULL); /* find pieces on the right */
+	U64 piecesle = (0xFF00000000000000ULL >> (63 - sq)) & (occupation | 0x0101010101010101ULL); /* find pieces on the left */
 	return (((0x8080808080808080ULL >> (63 - LSB(piecesup))) & (0x0101010101010101ULL << MSB(piecesdo))) |
 		((0xFF00000000000000ULL >> (63 - LSB(piecesri))) & (0x00000000000000FFULL << MSB(piecesle)))) ^ piece;
 	/* From every direction find the first piece and from that piece put a mask in the opposite direction.
@@ -453,37 +561,33 @@ static inline TBB GenRook(uint64_t sq, TBB occupation)
 }
 
 /* return the bitboard with the bishops destinations */
-static inline TBB GenBishop(uint64_t sq, TBB occupation)
+static inline U64 GenBishop(uint64_t sq, U64 occupation)
 {  /* it's the same as the rook */
-	TBB piece = 1ULL << sq;
+	U64 piece = 1ULL << sq;
 	occupation ^= piece;
-	TBB piecesup = (0x8040201008040201ULL << sq) & (occupation | 0xFF80808080808080ULL);
-	TBB piecesdo = (0x8040201008040201ULL >> (63 - sq)) & (occupation | 0x01010101010101FFULL);
-	TBB piecesle = (0x8102040810204081ULL << sq) & (occupation | 0xFF01010101010101ULL);
-	TBB piecesri = (0x8102040810204081ULL >> (63 - sq)) & (occupation | 0x80808080808080FFULL);
+	U64 piecesup = (0x8040201008040201ULL << sq) & (occupation | 0xFF80808080808080ULL);
+	U64 piecesdo = (0x8040201008040201ULL >> (63 - sq)) & (occupation | 0x01010101010101FFULL);
+	U64 piecesle = (0x8102040810204081ULL << sq) & (occupation | 0xFF01010101010101ULL);
+	U64 piecesri = (0x8102040810204081ULL >> (63 - sq)) & (occupation | 0x80808080808080FFULL);
 	return (((0x8040201008040201ULL >> (63 - LSB(piecesup))) & (0x8040201008040201ULL << MSB(piecesdo))) |
 		((0x8102040810204081ULL >> (63 - LSB(piecesle))) & (0x8102040810204081ULL << MSB(piecesri)))) ^ piece;
 }
 
 /* return the bitboard with pieces of the same type */
-static inline TBB BBPieces(TPieceType piece)
-{
-	switch (piece) // find the bb with the pieces of the same type
-	{
-	case PAWN: return Pawns;
-	case KNIGHT: return Knights;
-	case BISHOP: return Bishops;
-	case ROOK: return Rooks;
-	case QUEEN: return Queens;
-	case KING: return Kings;
+static inline U64 BBPieces(Position* pos, TPieceType piece) {
+	switch (piece) {
+	case PAWN: return Pawns(pos);
+	case KNIGHT: return Knights(pos);
+	case BISHOP: return Bishops(pos);
+	case ROOK: return Rooks(pos);
+	case QUEEN: return Queens(pos);
+	case KING: return Kings(pos);
 	}
 }
 
 /* return the bitboard with the destinations of a piece in a square (exept for pawns) */
-static inline TBB BBDestinations(TPieceType piece, uint64_t sq, TBB occupation)
-{
-	switch (piece) // generate the destination squares of the piece
-	{
+static inline U64 BBDestinations(TPieceType piece, uint64_t sq, U64 occupation){
+	switch (piece){
 	case KNIGHT: return KnightDest[sq];
 	case BISHOP: return GenBishop(sq, occupation);
 	case ROOK: return GenRook(sq, occupation);
@@ -493,103 +597,98 @@ static inline TBB BBDestinations(TPieceType piece, uint64_t sq, TBB occupation)
 }
 
 /* If the king is in check this function return the pieces that are attacking the king. If there aren't it returns 0 */
-static inline TBB InCheck(void)
+static inline U64 InCheck(Position* pos)
 {
-	TBB occupation, opposing;
-	TBB king = Kings & position->PM;
-	uint64_t kingsq = LSB(king);
-	occupation = Occupation;
-	opposing = position->PM ^ occupation;
-	return (((KnightDest[kingsq] & Knights) |
-		(GenRook(kingsq, occupation) & (Rooks | Queens)) |
-		(GenBishop(kingsq, occupation) & (Bishops | Queens)) |
-		((((king << 9) & 0xFEFEFEFEFEFEFEFEULL) | ((king << 7) & 0x7F7F7F7F7F7F7F7FULL)) & Pawns) |
-		(KingDest[kingsq] & Kings)) & opposing);
+	U64 kings = Kings(pos);
+	U64 king = kings & pos->PM;
+	U64 skKing = LSB(king);
+	U64 occupation = Occupation(pos);
+	U64 opposing = pos->PM ^ occupation;
+	return (((KnightDest[skKing] & Knights(pos)) |
+		(GenRook(skKing, occupation) & (Rooks(pos) | Queens(pos))) |
+		(GenBishop(skKing, occupation) & (Bishops(pos) | Queens(pos))) |
+		((((king << 9) & 0xFEFEFEFEFEFEFEFEULL) | ((king << 7) & 0x7F7F7F7F7F7F7F7FULL)) & Pawns(pos)) |
+		(KingDest[skKing] & kings)) & opposing);
 }
 
 /* try the move and see if the king is in check. If so return the attacking pieces, if not return 0 */
-static inline TBB Illegal(TMove move)
-{
-	TBB From, To;
-	From = 1ULL << move.From;
-	To = 1ULL << move.To;
-	TBB occupation, opposing;
-	occupation = Occupation;
-	opposing = position->PM ^ occupation;
-	TBB newoccupation, newopposing;
-	TBB king;
-	uint64_t kingsq;
-	newoccupation = (occupation ^ From) | To;
-	newopposing = opposing & ~To;
-	if ((move.MoveType & 0x07) == KING)
-	{
-		king = To;
-		kingsq = move.To;
+static inline U64 Illegal(Position* pos, TMove move) {
+	U64 from = 1ULL << move.from;
+	U64 to = 1ULL << move.to;
+	U64 occupation = Occupation(pos);
+	U64 opposing = pos->PM ^ occupation;
+	U64 bbKing;
+	uint64_t sqKing;
+	U64 newoccupation = (occupation ^ from) | to;
+	U64 newopposing = opposing & ~to;
+	if ((move.flag & 0x07) == KING){
+		bbKing = to;
+		sqKing = move.to;
 	}
-	else
-	{
-		king = Kings & position->PM;
-		kingsq = LSB(king);
-		if (move.MoveType & EP) { newopposing ^= To >> 8; newoccupation ^= To >> 8; }
+	else{
+		bbKing = Kings(pos) & pos->PM;
+		sqKing = LSB(bbKing);
+		if (move.flag & EP) {
+			newopposing ^= to >> 8;
+			newoccupation ^= to >> 8;
+		}
 	}
-	return (((KnightDest[kingsq] & Knights) |
-		(GenRook(kingsq, newoccupation) & (Rooks | Queens)) |
-		(GenBishop(kingsq, newoccupation) & (Bishops | Queens)) |
-		((((king << 9) & 0xFEFEFEFEFEFEFEFEULL) | ((king << 7) & 0x7F7F7F7F7F7F7F7FULL)) & Pawns) |
-		(KingDest[kingsq] & Kings)) & newopposing);
+	return (((KnightDest[sqKing] & Knights(pos)) |
+		(GenRook(sqKing, newoccupation) & (Rooks(pos) | Queens(pos))) |
+		(GenBishop(sqKing, newoccupation) & (Bishops(pos) | Queens(pos))) |
+		((((bbKing << 9) & 0xFEFEFEFEFEFEFEFEULL) | ((bbKing << 7) & 0x7F7F7F7F7F7F7F7FULL)) & Pawns(pos)) |
+		(KingDest[sqKing] & Kings(pos))) & newopposing);
 }
 
 /* Generate all pseudo-legal quiet moves */
-static inline int GenerateQuiets(TMove* const quiets)
-{
-	TBB occupation, opposing;
-	occupation = Occupation;
-	opposing = occupation ^ position->PM;
+static inline int GenerateQuiets(Position* pos, TMove* const quiets) {
+	U64 occupation = Occupation(pos);
+	U64 opposing = occupation ^ pos->PM;
 
 	TMove* pquiets = quiets;
 	for (TPieceType piece = KING; piece >= KNIGHT; piece--) // generate moves from king to knight
 	{
 		// generate moves for every piece of the same type of the side to move
-		for (TBB pieces = BBPieces(piece) & position->PM; pieces; pieces = ClearLSB(pieces))
+		for (U64 pieces = BBPieces(pos, piece) & pos->PM; pieces; pieces = ClearLSB(pieces))
 		{
 			uint64_t sq = LSB(pieces);
 			// for every destinations on a free square generate a move
-			for (TBB destinations = ~occupation & BBDestinations(piece, sq, occupation); destinations; destinations = ClearLSB(destinations))
+			for (U64 destinations = ~occupation & BBDestinations(piece, sq, occupation); destinations; destinations = ClearLSB(destinations))
 			{
-				pquiets->MoveType = piece;
-				pquiets->From = sq;
-				pquiets->To = LSB(destinations);
-				pquiets->Prom = EMPTY;
+				pquiets->flag = piece;
+				pquiets->from = sq;
+				pquiets->to = LSB(destinations);
+				pquiets->promo = EMPTY;
 				pquiets++;
 			}
 		}
 	}
 
 	/* one pawns push */
-	TBB push1 = (((Pawns & position->PM) << 8) & ~occupation) & 0x00FFFFFFFFFFFFFFULL;
-	for (TBB pieces = push1; pieces; pieces = ClearLSB(pieces))
+	U64 push1 = (((Pawns(pos) & pos->PM) << 8) & ~occupation) & 0x00FFFFFFFFFFFFFFULL;
+	for (U64 pieces = push1; pieces; pieces = ClearLSB(pieces))
 	{
-		pquiets->MoveType = PAWN;
-		pquiets->From = LSB(pieces) - 8;
-		pquiets->To = LSB(pieces);
-		pquiets->Prom = EMPTY;
+		pquiets->flag = PAWN;
+		pquiets->from = LSB(pieces) - 8;
+		pquiets->to = LSB(pieces);
+		pquiets->promo = EMPTY;
 		pquiets++;
 	}
 
 	/* double pawns pushes */
-	for (TBB push2 = (push1 << 8) & ~occupation & 0x00000000FF000000ULL; push2; push2 = ClearLSB(push2))
+	for (U64 push2 = (push1 << 8) & ~occupation & 0x00000000FF000000ULL; push2; push2 = ClearLSB(push2))
 	{
-		pquiets->MoveType = PAWN;
-		pquiets->From = LSB(push2) - 16;
-		pquiets->To = LSB(push2);
-		pquiets->Prom = EMPTY;
+		pquiets->flag = PAWN;
+		pquiets->from = LSB(push2) - 16;
+		pquiets->to = LSB(push2);
+		pquiets->promo = EMPTY;
 		pquiets++;
 	}
 
 	/* check if long castling is possible */
-	if (CastleMQ && !(occupation & 0x0EULL))
+	if ((pos->castleFlags & CASTLE_WQ) && !(occupation & 0x0EULL))
 	{
-		TBB roo, bis;
+		U64 roo, bis;
 		roo = ExtractLSB(0x1010101010101000ULL & occupation); /* column e */
 		roo |= ExtractLSB(0x0808080808080800ULL & occupation); /*column d */
 		roo |= ExtractLSB(0x0404040404040400ULL & occupation); /*column c */
@@ -600,20 +699,20 @@ static inline int GenerateQuiets(TMove* const quiets)
 		bis |= ExtractLSB(0x0000000080402000ULL & occupation); /*diag from e1/e8 */
 		bis |= ExtractLSB(0x0000008040201000ULL & occupation); /*diag from d1/d8 */
 		bis |= ExtractLSB(0x0000804020100800ULL & occupation); /*diag from c1/c8 */
-		if (!(((roo & (Rooks | Queens)) | (bis & (Bishops | Queens)) | (0x00000000003E7700ULL & Knights) |
-			(0x0000000000003E00ULL & Pawns) | (Kings & 0x0000000000000600ULL)) & opposing))
+		if (!(((roo & (Rooks(pos) | Queens(pos))) | (bis & (Bishops(pos) | Queens(pos))) | (0x00000000003E7700ULL & Knights(pos)) |
+			(0x0000000000003E00ULL & Pawns(pos)) | (Kings(pos) & 0x0000000000000600ULL)) & opposing))
 		{  /* check if c1/c8 d1/d8 e1/e8 are not attacked */
-			pquiets->MoveType = KING | CASTLE;
-			pquiets->From = 4;
-			pquiets->To = 2;
-			pquiets->Prom = EMPTY;
+			pquiets->flag = KING | CASTLE;
+			pquiets->from = 4;
+			pquiets->to = 2;
+			pquiets->promo = EMPTY;
 			pquiets++;
 		}
 	}
 	/* check if short castling is possible */
-	if (CastleMK && !(occupation & 0x60ULL))
+	if ((pos->castleFlags & CASTLE_WK) && !(occupation & 0x60ULL))
 	{
-		TBB roo, bis;
+		U64 roo, bis;
 		roo = ExtractLSB(0x1010101010101000ULL & occupation); /* column e */
 		roo |= ExtractLSB(0x2020202020202000ULL & occupation); /* column f */
 		roo |= ExtractLSB(0x4040404040404000ULL & occupation); /* column g */
@@ -624,13 +723,13 @@ static inline int GenerateQuiets(TMove* const quiets)
 		bis |= ExtractLSB(0x0000000080402000ULL & occupation); /*diag from e1/e8 */
 		bis |= ExtractLSB(0x0000000000804000ULL & occupation); /*diag from f1/f8 */
 		bis |= 0x0000000000008000ULL; /*diag from g1/g8 */
-		if (!(((roo & (Rooks | Queens)) | (bis & (Bishops | Queens)) | (0x0000000000F8DC00ULL & Knights) |
-			(0x000000000000F800ULL & Pawns) | (Kings & 0x0000000000004000ULL)) & opposing))
+		if (!(((roo & (Rooks(pos) | Queens(pos))) | (bis & (Bishops(pos) | Queens(pos))) | (0x0000000000F8DC00ULL & Knights(pos)) |
+			(0x000000000000F800ULL & Pawns(pos)) | (Kings(pos) & 0x0000000000004000ULL)) & opposing))
 		{  /* check if e1/e8 f1/f8 g1/g8 are not attacked */
-			pquiets->MoveType = KING | CASTLE;
-			pquiets->From = 4;
-			pquiets->To = 6;
-			pquiets->Prom = EMPTY;
+			pquiets->flag = KING | CASTLE;
+			pquiets->from = 4;
+			pquiets->to = 6;
+			pquiets->promo = EMPTY;
 			pquiets++;
 		}
 	}
@@ -638,48 +737,48 @@ static inline int GenerateQuiets(TMove* const quiets)
 }
 
 /* Generate all pseudo-legal capture and promotions */
-static inline int GenerateCapture(TMove* const capture)
+static inline int GenerateCapture(Position* pos, TMove* const capture)
 {
-	TBB opposing, occupation;
-	occupation = Occupation;
-	opposing = position->PM ^ occupation;
+	U64 opposing, occupation;
+	occupation = Occupation(pos);
+	opposing = pos->PM ^ occupation;
 
 	TMove* pcapture = capture;
 	for (TPieceType piece = KING; piece >= KNIGHT; piece--) // generate moves from king to knight
 	{
 		// generate moves for every piece of the same type of the side to move
-		for (TBB pieces = BBPieces(piece) & position->PM; pieces; pieces = ClearLSB(pieces))
+		for (U64 pieces = BBPieces(pos, piece) & pos->PM; pieces; pieces = ClearLSB(pieces))
 		{
 			uint64_t sq = LSB(pieces);
 			// for every destinations on an opponent pieces generate a move
-			for (TBB destinations = opposing & BBDestinations(piece, sq, occupation); destinations; destinations = ClearLSB(destinations))
+			for (U64 destinations = opposing & BBDestinations(piece, sq, occupation); destinations; destinations = ClearLSB(destinations))
 			{
-				pcapture->MoveType = piece | CAPTURE;
-				pcapture->From = sq;
-				pcapture->To = LSB(destinations);
-				pcapture->Prom = EMPTY;
+				pcapture->flag = piece | CAPTURE;
+				pcapture->from = sq;
+				pcapture->to = LSB(destinations);
+				pcapture->promo = EMPTY;
 				pcapture++;
 			}
 		}
 	}
 
 	/* Generate pawns right captures */
-	TBB pieces = Pawns & position->PM;
-	for (TBB captureri = (pieces << 9) & 0x00FEFEFEFEFEFEFEULL & opposing; captureri; captureri = ClearLSB(captureri))
+	U64 pieces = Pawns(pos) & pos->PM;
+	for (U64 captureri = (pieces << 9) & 0x00FEFEFEFEFEFEFEULL & opposing; captureri; captureri = ClearLSB(captureri))
 	{
-		pcapture->MoveType = PAWN | CAPTURE;
-		pcapture->From = LSB(captureri) - 9;
-		pcapture->To = LSB(captureri);
-		pcapture->Prom = EMPTY;
+		pcapture->flag = PAWN | CAPTURE;
+		pcapture->from = LSB(captureri) - 9;
+		pcapture->to = LSB(captureri);
+		pcapture->promo = EMPTY;
 		pcapture++;
 	}
 	/* Generate pawns left captures */
-	for (TBB capturele = (pieces << 7) & 0x007F7F7F7F7F7F7FULL & opposing; capturele; capturele = ClearLSB(capturele))
+	for (U64 capturele = (pieces << 7) & 0x007F7F7F7F7F7F7FULL & opposing; capturele; capturele = ClearLSB(capturele))
 	{
-		pcapture->MoveType = PAWN | CAPTURE;
-		pcapture->From = LSB(capturele) - 7;
-		pcapture->To = LSB(capturele);
-		pcapture->Prom = EMPTY;
+		pcapture->flag = PAWN | CAPTURE;
+		pcapture->from = LSB(capturele) - 7;
+		pcapture->to = LSB(capturele);
+		pcapture->promo = EMPTY;
 		pcapture++;
 	}
 
@@ -687,200 +786,195 @@ static inline int GenerateCapture(TMove* const capture)
 	if (pieces & 0x00FF000000000000ULL)
 	{
 		/* promotions with left capture */
-		for (TBB promo = (pieces << 9) & 0xFE00000000000000ULL & opposing; promo; promo = ClearLSB(promo)) {
+		for (U64 promo = (pieces << 9) & 0xFE00000000000000ULL & opposing; promo; promo = ClearLSB(promo)) {
 			for (TPieceType piece = QUEEN; piece >= KNIGHT; piece--) /* generate underpromotions */
 			{
-				pcapture->MoveType = PAWN | PROMO | CAPTURE;
-				pcapture->From = LSB(promo) - 9;
-				pcapture->To = LSB(promo);
-				pcapture->Prom = piece;
+				pcapture->flag = PAWN | PROMO | CAPTURE;
+				pcapture->from = LSB(promo) - 9;
+				pcapture->to = LSB(promo);
+				pcapture->promo = piece;
 				pcapture++;
 			}
 		}
 		/* promotions with right capture */
-		for (TBB promo = (pieces << 7) & 0x7F00000000000000ULL & opposing; promo; promo = ClearLSB(promo))
+		for (U64 promo = (pieces << 7) & 0x7F00000000000000ULL & opposing; promo; promo = ClearLSB(promo))
 		{
 			for (TPieceType piece = QUEEN; piece >= KNIGHT; piece--) /* generate underpromotions */
 			{
-				pcapture->MoveType = PAWN | PROMO | CAPTURE;
-				pcapture->From = LSB(promo) - 7;
-				pcapture->To = LSB(promo);
-				pcapture->Prom = piece;
+				pcapture->flag = PAWN | PROMO | CAPTURE;
+				pcapture->from = LSB(promo) - 7;
+				pcapture->to = LSB(promo);
+				pcapture->promo = piece;
 				pcapture++;
 			}
 		}
 		/* no capture promotions */
-		for (TBB promo = ((pieces << 8) & ~occupation) & 0xFF00000000000000ULL; promo; promo = ClearLSB(promo))
+		for (U64 promo = ((pieces << 8) & ~occupation) & 0xFF00000000000000ULL; promo; promo = ClearLSB(promo))
 		{
 			for (TPieceType piece = QUEEN; piece >= KNIGHT; piece--) /* generate underpromotions */
 			{
-				pcapture->MoveType = PAWN | PROMO;
-				pcapture->From = LSB(promo) - 8;
-				pcapture->To = LSB(promo);
-				pcapture->Prom = piece;
+				pcapture->flag = PAWN | PROMO;
+				pcapture->from = LSB(promo) - 8;
+				pcapture->to = LSB(promo);
+				pcapture->promo = piece;
 				pcapture++;
 			}
 		}
 	}
 
-	if (position->enPassant != 8)
+	if (pos->enPassant != 8)
 	{  /* Generate EnPassant captures */
-		for (TBB enpassant = pieces & enPassant[position->enPassant]; enpassant; enpassant = ClearLSB(enpassant))
+		for (U64 enpassant = pieces & enPassant[pos->enPassant]; enpassant; enpassant = ClearLSB(enpassant))
 		{
-			pcapture->MoveType = PAWN | EP | CAPTURE;
-			pcapture->From = LSB(enpassant);
-			pcapture->To = 40 + position->enPassant;
-			pcapture->Prom = EMPTY;
+			pcapture->flag = PAWN | EP | CAPTURE;
+			pcapture->from = LSB(enpassant);
+			pcapture->to = 40 + pos->enPassant;
+			pcapture->promo = EMPTY;
 			pcapture++;
 		}
 	}
 	return pcapture - capture;
 }
 
-static int GenerateMoves(TMove* const moves, int onlyCaptures) {
-	int count = GenerateCapture(moves);
+static int GenerateMoves(Position* pos, TMove* const moves, int onlyCaptures) {
+	int count = GenerateCapture(pos, moves);
 	if (!onlyCaptures)
-		count += GenerateQuiets(moves + count);
+		count += GenerateQuiets(pos, moves + count);
 	return count;
 }
 
 /* Make the move */
-static inline void Make(TMove move)
-{
-	position++;
-	*position = *(position - 1); /* copy the previous position into the last one */
-	TBB part = 1ULL << move.From;
-	TBB dest = 1ULL << move.To;
-	switch (move.MoveType & 0x07)
-	{
+static inline void Make(Position* pos, TMove move) {
+	U64 sou = 1ULL << move.from;
+	U64 des = 1ULL << move.to;
+	switch (move.flag & 0x07) {
 	case PAWN:
-		if (move.MoveType & EP)
+		if (move.flag & EP)
 		{  /* EnPassant */
-			position->PM ^= part | dest;
-			position->P0 ^= part | dest;
-			position->P0 ^= dest >> 8; /* delete the captured pawn */
-			position->enPassant = 8;
+			pos->PM ^= sou | des;
+			pos->P0 ^= sou | des;
+			pos->P0 ^= des >> 8; /* delete the captured pawn */
+			pos->enPassant = 8;
 		}
 		else
 		{
-			if (move.MoveType & CAPTURE)
+			if (move.flag & CAPTURE)
 			{  /* Delete the captured piece */
-				position->P0 &= ~dest;
-				position->P1 &= ~dest;
-				position->P2 &= ~dest;
+				pos->P0 &= ~des;
+				pos->P1 &= ~des;
+				pos->P2 &= ~des;
 			}
-			if (move.MoveType & PROMO)
+			if (move.flag & PROMO)
 			{
-				position->PM ^= part | dest;
-				position->P0 ^= part;
-				position->P0 |= (TBB)(move.Prom & 1) << (move.To);
-				position->P1 |= (TBB)(((move.Prom) >> 1) & 1) << (move.To);
-				position->P2 |= (TBB)((move.Prom) >> 2) << (move.To);
-				position->enPassant = 8; /* clear enpassant */
+				pos->PM ^= sou | des;
+				pos->P0 ^= sou;
+				pos->P0 |= (U64)(move.promo & 1) << (move.to);
+				pos->P1 |= (U64)(((move.promo) >> 1) & 1) << (move.to);
+				pos->P2 |= (U64)((move.promo) >> 2) << (move.to);
+				pos->enPassant = 8; /* clear enpassant */
 			}
 			else /* capture or push */
 			{
-				position->PM ^= part | dest;
-				position->P0 ^= part | dest;
-				position->enPassant = 8; /* clear enpassant */
-				if (move.To == move.From + 16 && EnPassantM[move.To & 0x07] & Pawns & (position->PM ^ (Occupation)))
-					position->enPassant = move.To & 0x07; /* save enpassant column */
-			}
-			if (move.MoveType & CAPTURE)
-			{
-				if (CastleEK && move.To == 63) ResetCastleEK; /* captured the opponent king side rook */
-				else if (CastleEQ && move.To == 56) ResetCastleEQ; /* captured the opponent quuen side rook */
+				pos->PM ^= sou | des;
+				pos->P0 ^= sou | des;
+				pos->enPassant = 8; /* clear enpassant */
+				if (move.to == move.from + 16 && EnPassantM[move.to & 0x07] & Pawns(pos) & (pos->PM ^ (Occupation(pos))))
+					pos->enPassant = move.to & 0x07; /* save enpassant column */
 			}
 		}
-		position->move50 = 0;
-		ChangeSide;
+		pos->move50 = 0;
+		FlipPosition(pos);
 		break;
 	case KNIGHT:
 	case BISHOP:
 	case ROOK:
 	case QUEEN:
-		if (move.MoveType & CAPTURE)
+		if (move.flag & CAPTURE)
 		{
-			position->P0 &= ~dest;
-			position->P1 &= ~dest;
-			position->P2 &= ~dest;
+			pos->P0 &= ~des;
+			pos->P1 &= ~des;
+			pos->P2 &= ~des;
 		}
-		position->PM ^= part | dest;
-		position->P0 ^= (move.MoveType & 1) ? part | dest : 0;
-		position->P1 ^= (move.MoveType & 2) ? part | dest : 0;
-		position->P2 ^= (move.MoveType & 4) ? part | dest : 0;
-		position->enPassant = 8;
-		if ((move.MoveType & 0x7) == ROOK) /* update the castle rights */
-		{
-			if (CastleMK && move.From == 7) ResetCastleMK;
-			else if (CastleMQ && move.From == 0) ResetCastleMQ;
-		}
-		if (move.MoveType & CAPTURE) /* update the castle rights */
-		{
-			if (CastleEK && move.To == 63) ResetCastleEK;
-			else if (CastleEQ && move.To == 56) ResetCastleEQ;
-			position->move50 = 0;
-		}
-		ChangeSide;
-		if (!(move.MoveType & CAPTURE))
-			position->move50++;
-		else position->move50 = 0;
+		pos->PM ^= sou | des;
+		pos->P0 ^= (move.flag & 1) ? sou | des : 0;
+		pos->P1 ^= (move.flag & 2) ? sou | des : 0;
+		pos->P2 ^= (move.flag & 4) ? sou | des : 0;
+		pos->enPassant = 8;
+		if (move.flag & CAPTURE)
+			pos->move50 = 0;
+		FlipPosition(pos);
+		if (!(move.flag & CAPTURE))
+			pos->move50++;
+		else
+			pos->move50 = 0;
 		break;
 	case KING:
-		if (move.MoveType & CAPTURE)
+		if (move.flag & CAPTURE)
 		{
-			position->P0 &= ~dest;
-			position->P1 &= ~dest;
-			position->P2 &= ~dest;
+			pos->P0 &= ~des;
+			pos->P1 &= ~des;
+			pos->P2 &= ~des;
 		}
-		position->PM ^= part | dest;
-		position->P1 ^= part | dest;
-		position->P2 ^= part | dest;
-		if (CastleMK) ResetCastleMK; /* update the castle rights */
-		if (CastleMQ) ResetCastleMQ;
-		position->enPassant = 8;
-		if (move.MoveType & CAPTURE)
-		{
-			if (CastleEK && move.To == 63) ResetCastleEK;
-			else if (CastleEQ && move.To == 56) ResetCastleEQ;
-			position->move50 = 0;
-		}
-		else if (move.MoveType & CASTLE)
-		{
-			if (move.To == 6)
-			{
-				position->PM ^= 0x00000000000000A0ULL; position->P2 ^= 0x00000000000000A0ULL;
+		pos->PM ^= sou | des;
+		pos->P1 ^= sou | des;
+		pos->P2 ^= sou | des;
+		pos->enPassant = 8;
+		if (move.flag & CAPTURE)
+			pos->move50 = 0;
+		else if (move.flag & CASTLE) {
+			if (move.to == SQ_G1) {
+				pos->PM ^= 0x00000000000000A0ULL;
+				pos->P2 ^= 0x00000000000000A0ULL;
 			} /* short castling */
-			else
-			{
-				position->P2 ^= 0x0000000000000009ULL; position->PM ^= 0x0000000000000009ULL;
+			else {
+				pos->P2 ^= 0x0000000000000009ULL;
+				pos->PM ^= 0x0000000000000009ULL;
 			} /* long castling */
 		}
-		ChangeSide;
-		if (!(move.MoveType & CAPTURE))
-			position->move50++;
-		else position->move50 = 0;
-	default: break;
+		FlipPosition(pos);
+		if (!(move.flag & CAPTURE))
+			pos->move50++;
+		else
+			pos->move50 = 0;
+		break;
 	}
+	pos->castleFlags &= boardCastle[move.from] & boardCastle[move.to];
 }
 
 /* Evaluate the leaf positions */
-static inline int Evaluate(){
-	int eval = 0;
-	int gamephase = PopCount(Knights | Bishops | Rooks | Queens | Kings);
-	for (int sides = 0; sides < 2; sides++) /* evaluate the 2 sides */
+static inline int Evaluate(Position* pos) {
+	int scoreMg = 0;
+	int scoreEg = 0;
+	int phase = 0;
+	int insufficent[2] = { 0 };
+	for (int side = 0; side < 2; side++) /* evaluate the 2 sides */
 	{
 		/* for every piece sum the static value and the pst value */
-		for (TPieceType pt = PAWN; pt <= QUEEN; pt++)
-			for (TBB pieces = BBPieces(pt) & position->PM; pieces; pieces = ClearLSB(pieces))
-				eval += PST[pt][LSB(pieces)] + StaticValue[pt];
-		/* interpolate the 2 pst of the king */
-		uint64_t kingsq = LSB(Kings & position->PM);
-		eval += (PST[KING][kingsq] * gamephase + PST[KING + 1][kingsq] * (16 - gamephase)) / 16;
-		ChangeSide;
-		eval = -eval;
+		for (TPieceType pt = PAWN; pt < PT_NB; pt++)
+			for (U64 pieces = BBPieces(pos, pt) & pos->PM; pieces; pieces = ClearLSB(pieces)) {
+				int sq = LSB(pieces);
+				phase += phaseVal[pt];
+				insufficent[side] += insufVal[pt];
+				scoreMg += mg_pst[pt][sq];
+				scoreEg += eg_pst[pt][sq];
+			}
+		FlipPosition(pos);
+		scoreMg = -scoreMg;
+		scoreEg = -scoreEg;
 	}
-	return eval;
+	if (max(insufficent[0], insufficent[1]) < 3)
+		return 0;
+	if (phase > 24) phase = 24;
+	return (scoreMg * phase + scoreEg * (24 - phase)) / 24;
+}
+
+static int Eval(Position* pos, U64 hash) {
+	TTEntryEval* ee = &ttEval[hash & ttMask];
+	if (ee->hash != hash) {
+		ee->hash = hash;
+		ee->score = Evaluate(pos);
+	}
+	return (ee->score * (100 - pos->move50)) / 100;
 }
 
 static int Permill() {
@@ -891,50 +985,57 @@ static int Permill() {
 	return pm;
 }
 
-static U64 GetHash() {
-	U64 hash = position->STM;
-	U64 copy = Occupation;
+static U64 GetHash(Position* pos) {
+	U64 hash = pos->STM;
+	U64 occupation = Occupation(pos);
+	U64 copy = occupation & pos->PM;
 	while (copy) {
 		const int sq = LSB(copy);
 		copy &= copy - 1;
-		hash ^= keys[Piece(sq) * 64 + sq];
+		hash ^= keys[PieceType(pos, sq) * 64 + sq];
 	}
-	if (position->enPassant < 8)
-		hash ^= keys[position->enPassant];
-	if (position->castleFlags)
-		hash ^= keys[8 + position->castleFlags];
+	copy = occupation ^ pos->PM;
+	while (copy) {
+		const int sq = LSB(copy);
+		copy &= copy - 1;
+		hash ^= keys[(PieceType(pos, sq) | 0x8) * 64 + sq];
+	}
+	if (pos->enPassant < 8)
+		hash ^= keys[pos->enPassant];
+	if (pos->castleFlags)
+		hash ^= keys[8 + pos->castleFlags];
 	return hash;
 }
 
-static int IsPseudolegalMove(const TMove move) {
+static int IsPseudolegalMove(Position* pos, const TMove move) {
 	TMove moves[256];
-	const int num_moves = GenerateMoves(moves, 0);
+	const int num_moves = GenerateMoves(pos, moves, 0);
 	for (int i = 0; i < num_moves; ++i)
 		if (moves[i].Move == move.Move)
 			return 1;
 	return 0;
 }
 
-static void PrintPv(const TMove move) {
-	if (!IsPseudolegalMove(move))
+static void PrintPv(Position* pos, const TMove move) {
+	if (!IsPseudolegalMove(pos, move))
 		return;
-	if (Illegal(move))
+	if (Illegal(pos, move))
 		return;
 	char strmove[8];
-	MoveToStr(strmove, move, position->STM);
+	MoveToStr(strmove, move, pos->STM);
 	printf(" %s", strmove);
-	Make(move);
-	const U64 hash = GetHash();
-	TTEntry* ttEntry = tt + (hash % TT_SIZE);
-	if (ttEntry->hash == hash && !IsRepetition(hash)) {
+	const Position npos = *pos;
+	Make(&npos, move);
+	const U64 hash = GetHash(&npos);
+	TTEntry* ttEntry = tt + (hash & ttMask);
+	if (ttEntry->hash == hash && !IsRepetition(&npos, hash)) {
 		historyHash[historyCount++] = hash;
-		PrintPv(ttEntry->move);
+		PrintPv(&npos, ttEntry->move);
 		historyCount--;
 	}
-	position--;
 }
 
-static void PrintInfo(int depth, int score) {
+static void PrintInfo(Position* pos, int depth, int score) {
 	printf("info depth %d score ", depth);
 	if (abs(score) < MATE - MAX_PLY)
 		printf("cp %d", score);
@@ -943,23 +1044,22 @@ static void PrintInfo(int depth, int score) {
 	printf(" time %lld", GetTimeMs() - info.timeStart);
 	printf(" nodes %lld", info.nodes);
 	printf(" hashfull %d pv", Permill());
-	PrintPv(ss[0].move);
+	PrintPv(pos, ss[0].move);
 	printf("\n");
 }
 
-static int IsRepetition(U64 hash) {
-	int limit = max(0, historyCount - position->move50);
+static int IsRepetition(Position* pos, U64 hash) {
+	int limit = max(0, historyCount - pos->move50);
 	for (int n = historyCount - 4; n >= limit; n -= 2)
 		if (historyHash[n] == hash)
 			return TRUE;
 	return FALSE;
 }
 
-static void PrintBoard(){
-	U64 hash = GetHash();
-	int color = position->STM == WHITE ? 0 : 1;
-	if (color)
-		ChangeSide;
+static void PrintBoard(Position* pos) {
+	int blackTurn = pos->STM == BLACK;
+	if (blackTurn)
+		FlipPosition(pos);
 	const char* s = "   +---+---+---+---+---+---+---+---+\n";
 	const char* t = "     A   B   C   D   E   F   G   H\n";
 	printf(t);
@@ -968,8 +1068,8 @@ static void PrintBoard(){
 		printf(" %d |", r + 1);
 		for (int f = 0; f < 8; f++) {
 			int sq = r * 8 + f;
-			int pt = PieceType(sq);
-			if (position->PM & (1ull << sq))
+			int pt = PieceType(pos, sq);
+			if (pos->PM & (1ull << sq))
 				printf(" %c |", " ANBRQK"[pt]);
 			else
 				printf(" %c |", " anbrqk"[pt]);
@@ -978,19 +1078,22 @@ static void PrintBoard(){
 	}
 	printf(s);
 	printf(t);
+	U64 hash = GetHash(pos);
+	S16 score = Evaluate(pos);
 	char castling[5] = "KQkq";
 	for (int n = 0; n < 4; n++)
-		if (!(position->castleFlags & (1 << n)))
+		if (!(pos->castleFlags & (1 << n)))
 			castling[n] = '-';
-	printf("side     : %16s\n", color ? "black" : "white");
+	printf("side     : %16s\n", blackTurn ? "black" : "white");
 	printf("castling : %16s\n", castling);
-	printf("hash     : %16llx\n",hash);
-	if (color)
-		ChangeSide;
+	printf("hash     : %16llx\n", hash);
+	printf("score    : %16d\n", score);
+	if (blackTurn)
+		FlipPosition(pos);
 }
 
-static int SearchAlpha(int alpha, int beta, int depth, int ply) {
-	if (CheckUp())
+static int SearchAlpha(Position* pos, int alpha, int beta, int depth, int ply, int do_null) {
+	if (CheckUp(pos))
 		return 0;
 	int  mateValue = MATE - ply;
 	if (alpha < -mateValue)
@@ -999,15 +1102,14 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 		beta = mateValue - 1;
 	if (alpha >= beta)
 		return alpha;
+	const U64 hash = GetHash(pos);
 
-	const U64 hash = GetHash();
-	TTEntry* ttEntry = tt + (hash % TT_SIZE);
+	TTEntry* ttEntry = tt + (hash & ttMask);
 	TMove tt_move = { 0 };
 	int inPv = beta - alpha > 1;
 	if (ttEntry->hash == hash) {
 		tt_move = ttEntry->move;
 		if (!inPv && ttEntry->depth >= depth) {
-			//printf("%16llx    : %16llx\n", hash, hash % TT_SIZE);
 			if (ttEntry->flag == EXACT)return ttEntry->score;
 			if (ttEntry->flag == LOWER && ttEntry->score <= alpha)return ttEntry->score;
 			if (ttEntry->flag == UPPER && ttEntry->score >= beta)return ttEntry->score;
@@ -1016,17 +1118,19 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 	else
 		depth -= depth > 3;
 
-	int inCheck = InCheck();
+	U64 inCheck = InCheck(pos);
 	if (inCheck)
 		depth = max(1, depth + 1);
-	int inQSearch = depth < 1;
-	if (ply && !inQSearch)
-		if (position->move50 >= 100 || IsRepetition(hash))
+	int inQuiescence = depth < 1;
+	if (ply && !inQuiescence)
+		if (pos->move50 >= 100 || IsRepetition(pos, hash))
 			return 0;
-	const int staticEval = Evaluate();
+
+	const int staticEval = ss[ply].score = Eval(pos, hash);
+	const int improving = ply > 1 && staticEval > ss[ply - 2].score;
 	if (ply >= MAX_PLY)
 		return staticEval;
-	if (inQSearch && alpha < staticEval) {
+	if (inQuiescence && alpha < staticEval) {
 		alpha = staticEval;
 		if (alpha >= beta)
 			return beta;
@@ -1034,16 +1138,18 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 
 	historyHash[historyCount++] = hash;
 	int score;
-	int color = position->STM == WHITE ? 0 : 1;
+	int color = pos->STM == WHITE ? 0 : 1;
 	U8 ttFlag = LOWER;
 	int legalMoves = 0;
+	int quietMoves = 0;
+	TMove qList[256];
 	S64 scoreList[256];
 	TMove movesList[256];
-	int movesCount = GenerateMoves(movesList, inQSearch);
+	int movesCount = GenerateMoves(pos, movesList, inQuiescence);
 	for (int j = 0; j < movesCount; ++j) {
 		TMove m = movesList[j];
-		const int ptSou = PieceType(m.From);
-		int ptDes = m.Prom ? m.Prom : PieceType(m.To);
+		const int ptSou = PieceType(pos, m.from);
+		int ptDes = m.promo ? m.promo : PieceType(pos, m.to);
 		if (m.Move == tt_move.Move)
 			scoreList[j] = 1LL << 62;
 		else if (ptDes != PT_NB)
@@ -1053,7 +1159,7 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 		else if (m.Move == ss[ply].killer2.Move)
 			scoreList[j] = 1LL << 48;
 		else
-			scoreList[j] = hh[color][m.From][m.To];
+			scoreList[j] = hh[color][m.from][m.to];
 	}
 	for (int i = 0; i < movesCount; ++i) {
 		int bstIdx = i;
@@ -1063,42 +1169,50 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 		TMove move = movesList[bstIdx];
 		scoreList[bstIdx] = scoreList[i];
 		movesList[bstIdx] = movesList[i];
-		if (Illegal(move))
+
+		if (Illegal(pos, move))
 			continue;
-		Make(move);
+		Position npos = *pos;
+		Make(&npos, move);
 
 		if (!legalMoves || depth < 4)
-			score = -SearchAlpha(-beta, -alpha, depth - 1, ply + 1);
+			score = -SearchAlpha(&npos, -beta, -alpha, depth - 1, ply + 1,1);
 		else {
 			int r = !inPv;
-			score = -SearchAlpha(-alpha - 1, -alpha, depth - 1 - r, ply + 1);
+			score = -SearchAlpha(&npos, -alpha - 1, -alpha, depth - 1 - r, ply + 1,1);
 			if (r && score > alpha)
-				score = -SearchAlpha(-alpha - 1, -alpha, depth - 1, ply + 1);
+				score = -SearchAlpha(&npos, -alpha - 1, -alpha, depth - 1, ply + 1,1);
 			if (score > alpha && score < beta)
-				score = -SearchAlpha(-beta, -alpha, depth - 1, ply + 1);
+				score = -SearchAlpha(&npos, -beta, -alpha, depth - 1, ply + 1,1);
 		}
-
-		position--; /* unmake the move bringing the previous position */
-		legalMoves++; /* increment the number of legal moves found */
 		if (info.stop)
 			break;
+		legalMoves++;
+		if (!(move.flag & (CAPTURE | PROMO)))
+			qList[quietMoves++] = move;
 		if (alpha < score) {
 			alpha = score;
 			ttFlag = EXACT;
 			ss[ply].move = move; /* save the best move found at this ply */
 			if (!ply && info.post)
-				PrintInfo(depth, score);
+				PrintInfo(pos, depth, score);
 		}
 		if (alpha >= beta) {
 			ttFlag = UPPER;
-			if (!(move.MoveType & (CAPTURE | PROMO))) {
+			if (!(move.flag & (CAPTURE | PROMO))) {
 				ss[ply].killer2 = ss[ply].killer1;
 				ss[ply].killer1 = move;
 			}
 			int bonus = depth * depth;
-			int h = hh[color][move.From][move.To];
-			h += bonus - h / 1024;
-			hh[color][move.From][move.To] = h;
+			int h = hh[color][move.from][move.to];
+			h += bonus - h * bonus / 1024;
+			hh[color][move.from][move.to] = h;
+			for (int n = 0; n < quietMoves; n++) {
+				TMove m = qList[n];
+				int hm = hh[color][m.from][m.to];
+				hm -= bonus - hm * bonus / 1024;
+				hh[color][m.from][m.to] = hm;
+			}
 			break;
 		}
 	}
@@ -1106,8 +1220,8 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 	historyCount--;
 	if (info.stop)
 		return 0;
-	if (!legalMoves && !inQSearch)
-		return inQSearch ? alpha : inCheck ? ply - MATE : 0;
+	if (!legalMoves && !inQuiescence)
+		return inQuiescence ? alpha : inCheck ? ply - MATE : 0;
 	ttEntry->hash = hash;
 	ttEntry->move = ss[ply].move;
 	ttEntry->depth = max(0, depth);
@@ -1116,7 +1230,7 @@ static int SearchAlpha(int alpha, int beta, int depth, int ply) {
 	return alpha;
 }
 
-static void SearchIteratively() {
+static void SearchIteratively(Position* pos) {
 	TTClear();
 	SSClear();
 	int score = 0;
@@ -1129,7 +1243,7 @@ static void SearchIteratively() {
 				alpha = score - aspL;
 				beta = score + aspH;
 			}
-			score = SearchAlpha(alpha, beta, depth, 0);
+			score = SearchAlpha(pos, alpha, beta, depth, 0,1);
 			if (score <= alpha) {
 				alpha -= aspL;
 				aspL *= 2;
@@ -1148,7 +1262,7 @@ static void SearchIteratively() {
 	}
 	if (info.post) {
 		char strmove[8];
-		MoveToStr(strmove, ss[0].move, position->STM);
+		MoveToStr(strmove, ss[0].move, pos->STM);
 		printf("bestmove %s\n", strmove);
 		fflush(stdout);
 	}
@@ -1158,28 +1272,28 @@ static void SearchIteratively() {
 Load a position starting from a fen and a list of moves.
 This function doesn't check the correctness of the fen and the moves sent.
 */
-static void SetFen(const char* fen)
-{
-	/* Clear the board */
-	position = Game;
-	position->P0 = position->P1 = position->P2 = position->PM = 0;
-	position->enPassant = 8;
-	position->STM = WHITE;
-	position->move50 = 0;
-	position->castleFlags = 0;
+static void SetFen(Position* pos, const char* fen) {
+	historyCount = 0;
+	pos->P0 = pos->P1 = pos->P2 = pos->PM = 0;
+	pos->enPassant = 8;
+	pos->STM = WHITE;
+	pos->move50 = 0;
+	pos->castleFlags = 0;
 
 	/* translate the fen to the relative position */
-	uint8_t pieceside = WHITE;
-	uint8_t piece = PAWN;
+	U8 pieceside = WHITE;
+	U8 piece = PAWN;
 	uint64_t square = 0;
 	const char* cursor;
 	for (cursor = fen; *cursor != ' '; cursor++)
 	{
-		if (*cursor >= '1' && *cursor <= '8') square += *cursor - '0';
-		else if (*cursor == '/') continue;
+		if (*cursor >= '1' && *cursor <= '8')
+			square += *cursor - '0';
+		else if (*cursor == '/')
+			continue;
 		else
 		{
-			uint64_t pos = OppSq(square);
+			uint64_t sq = FLIP(square);
 			if (*cursor == 'p') { piece = PAWN; pieceside = BLACK; }
 			else if (*cursor == 'n') { piece = KNIGHT; pieceside = BLACK; }
 			else if (*cursor == 'b') { piece = BISHOP; pieceside = BLACK; }
@@ -1192,35 +1306,35 @@ static void SetFen(const char* fen)
 			else if (*cursor == 'R') { piece = ROOK; pieceside = WHITE; }
 			else if (*cursor == 'Q') { piece = QUEEN; pieceside = WHITE; }
 			else if (*cursor == 'K') { piece = KING; pieceside = WHITE; }
-			position->P0 |= ((uint64_t)piece & 1) << pos;
-			position->P1 |= ((uint64_t)(piece >> 1) & 1) << pos;
-			position->P2 |= ((uint64_t)piece >> 2) << pos;
-			if (pieceside == WHITE) { position->PM |= 1ULL << pos; piece |= BLACK; }
+			pos->P0 |= ((uint64_t)piece & 1) << sq;
+			pos->P1 |= ((uint64_t)(piece >> 1) & 1) << sq;
+			pos->P2 |= ((uint64_t)piece >> 2) << sq;
+			if (pieceside == WHITE) { pos->PM |= 1ULL << sq; piece |= BLACK; }
 			square++;
 		}
 	}
 	cursor++; /* read the side to move  */
-	U8 sidetomove = *cursor == 'w' ? WHITE : BLACK;
+	int sideBlack = *cursor == 'b';
 	cursor += 2;
 	if (*cursor != '-') /* read the castle rights */
 	{
 		for (; *cursor != ' '; cursor++)
 		{
 			if (*cursor == 'K')
-				position->castleFlags |= CASTLE_WK;
+				pos->castleFlags |= CASTLE_WK;
 			else if (*cursor == 'Q')
-				position->castleFlags |= CASTLE_WQ;
+				pos->castleFlags |= CASTLE_WQ;
 			else if (*cursor == 'k')
-				position->castleFlags |= CASTLE_BK;
+				pos->castleFlags |= CASTLE_BK;
 			else if (*cursor == 'q')
-				position->castleFlags |= CASTLE_BQ;
+				pos->castleFlags |= CASTLE_BQ;
 		}
 		cursor++;
 	}
 	else cursor += 2;
 	if (*cursor != '-') /* read the enpassant column */
 	{
-		position->enPassant = *cursor - 'a';
+		pos->enPassant = *cursor - 'a';
 		cursor++;
 	}
 	else cursor += 2;
@@ -1228,21 +1342,22 @@ static void SetFen(const char* fen)
 	char* pcounter;
 	for (pcounter = counter50moves; *cursor != ' '; cursor++, pcounter++) *pcounter = *cursor; /* copy the string */
 	*pcounter = '\0';
-	position->move50 = atoi(counter50moves); /* convert the string counter to integer */
-	if (sidetomove == BLACK) ChangeSide;
+	pos->move50 = atoi(counter50moves); /* convert the string counter to integer */
+	if (sideBlack)
+		FlipPosition(pos);
 }
 
-static inline void PerftDriver(int depth) {
+static inline void PerftDriver(Position* pos, int depth) {
 	TMove moves[256];
-	const int numMoves = GenerateMoves(moves, 0);
+	const int numMoves = GenerateMoves(pos, moves, 0);
 	for (int n = 0; n < numMoves; n++) {
 		TMove move = moves[n];
-		if (Illegal(move))
+		if (Illegal(pos, move))
 			continue;
 		if (depth) {
-			Make(move);
-			PerftDriver(depth - 1);
-			position--;
+			Position npos = *pos;
+			Make(&npos, move);
+			PerftDriver(&npos, depth - 1);
 		}
 		else
 			info.nodes++;
@@ -1289,13 +1404,13 @@ static void ResetInfo() {
 }
 
 //performance test
-static void UciPerformance() {
+static void UciPerformance(Position* pos) {
 	ResetInfo();
 	PrintPerformanceHeader();
 	info.depthLimit = 0;
 	U64 elapsed = 0;
 	while (elapsed < 3000) {
-		PerftDriver(info.depthLimit++);
+		PerftDriver(pos, info.depthLimit++);
 		elapsed = GetTimeMs() - info.timeStart;
 		printf(" %2d. %8llu %12llu\n", info.depthLimit, elapsed, info.nodes);
 	}
@@ -1303,7 +1418,7 @@ static void UciPerformance() {
 }
 
 //start benchmark
-static void UciBench() {
+static void UciBench(Position* pos) {
 	ResetInfo();
 	PrintPerformanceHeader();
 	info.depthLimit = 0;
@@ -1311,40 +1426,39 @@ static void UciBench() {
 	U64 elapsed = 0;
 	while (elapsed < 3000) {
 		++info.depthLimit;
-		SearchIteratively();
+		SearchIteratively(pos);
 		elapsed = GetTimeMs() - info.timeStart;
 		printf(" %2d. %8llu %12llu\n", info.depthLimit, elapsed, info.nodes);
 	}
 	PrintSummary(elapsed, info.nodes);
 }
 
-static void SetMoves(char* str) {
+static void SetMoves(Position* pos, char* str) {
 	char buffer[4000];
 	strcpy(buffer, str);
 	char* strmove;
 	for (strmove = strtok(buffer, " "); strmove; strmove = strtok(NULL, " ")) {
-		TMove move = StrToMove(strmove);
-		Make(move);
-		if (position->move50 == 0) {  /* if the counter is zeroed we can put this position in the beginnig of the array because there can't be repetitions before */
-			Game[0] = *position;
-			position = Game;
-		}
+		TMove move = StrToMove(pos, strmove);
+		historyHash[historyCount++] = GetHash(pos);
+		Make(pos, move);
+		if (pos->move50 == 0)
+			historyCount = 0;
 	}
 }
 
-static void ParsePosition(char* str) {
+static void ParsePosition(Position* pos, char* str) {
 	char* fen = strstr(str, "fen");
 	char* mov = strstr(str, "moves");
 	if (!fen)
 		fen = START_FEN;
 	else
 		fen += 4;
-	SetFen(fen);
+	SetFen(pos, fen);
 	if (mov)
-		SetMoves(mov + 6);
+		SetMoves(pos, mov + 6);
 }
 
-static void ParseGo(char* command) {
+static void ParseGo(Position* pos, char* command) {
 	ResetInfo();
 	int wtime = 0;
 	int btime = 0;
@@ -1368,14 +1482,14 @@ static void ParseGo(char* command) {
 		info.depthLimit = atoi(argument + 6);
 	if (argument = strstr(command, "nodes"))
 		info.nodesLimit = atoi(argument + 5);
-	int time = position->STM ? btime : wtime;
-	int inc = position->STM ? binc : winc;
+	int time = pos->STM ? btime : wtime;
+	int inc = pos->STM ? binc : winc;
 	if (time)
 		info.timeLimit = max(1, min(time / movestogo + inc, time / 2));
-	SearchIteratively();
+	SearchIteratively(pos);
 }
 
-void UciCommand(char* str) {
+void UciCommand(Position* pos, char* str) {
 	if (!strncmp(str, "ucinewgame", 10));
 	else if (!strncmp(str, "uci", 3)) {
 		printf("id name %s\nuciok\n", NAME);
@@ -1385,34 +1499,57 @@ void UciCommand(char* str) {
 		printf("readyok\n");
 		fflush(stdout);
 	}
-	else if (!strncmp(str, "go", 2))ParseGo(str + 2);
-	else if (!strncmp(str, "position", 8))ParsePosition(str + 8);
-	else if (!strncmp(str, "print", 5))PrintBoard();
-	else if (!strncmp(str, "perft", 5))UciPerformance();
-	else if (!strncmp(str, "bench", 5))UciBench();
+	else if (!strncmp(str, "go", 2))ParseGo(pos, str + 2);
+	else if (!strncmp(str, "position", 8))ParsePosition(pos, str + 8);
+	else if (!strncmp(str, "print", 5))PrintBoard(pos);
+	else if (!strncmp(str, "perft", 5))UciPerformance(pos);
+	else if (!strncmp(str, "bench", 5))UciBench(pos);
 	else if (!strncmp(str, "stop", 4))info.stop = TRUE;
 	else if (!strncmp(str, "quit", 4))exit(0);
 }
 
-static void UciLoop() {
+static void UciLoop(Position* pos) {
 	//TestPerft();
-	//UciCommand("position fen r2qk2r/ppp2ppp/3b1n2/8/4P3/1PP2b2/P1Q2P1P/RNB1KB1R b KQkq - 0 10 moves f3h1 f1b5");
-	// 
+	//UciCommand("position startpos moves d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 g1f3 c7c5 c1g5 c5d4 f3d4 d5c4 e2e3 d8b6 f1c4 f8e7 e1g1 e8g8 d1c2 b8c6 d4c6 b6c6 c4d3 h7h6 g5h4 c8d7 d3b5 c6c8 b5d7 c8d7 a1d1 d7c6 e3e4 e6e5 c2e2 a8e8 c3d5 f6d5 e4d5 c6d6 h4e7 e8e7 f1e1 e5e4 d1d4 f8d8 h2h3 f7f5 a2a4 d8e8 e2c2 b7b6 c2c6 e7d7 e1c1 e8d8 c6d6 d7d6 c1d1 g8f7 b2b4 f7f6 a4a5 f6e5 d4c4");
 	//UciCommand("position fen 8/3P4/1p3b1p/p7/P7/1P3NPP/4p1K1/3k4 w - - 0 1");
-	// 
 	//UciCommand("position startpos moves e2e4 b8c6 d2d4 e7e5 d4e5 d7d6 e5d6 f8d6 c2c3 g8f6 g2g4 c8g4 d1d3 c6e5 d3c2 e5f3 g1f3 g4f3 b2b3 f3h1 f1b5 c7c6 c1g5 c6b5 g5e3 h1e4 c2e2 e8g8 a2a3 f6d5");
 	//UciCommand("position startpos moves e2e4 b8c6 d2d4 e7e5 d4e5 d7d6 e5d6 f8d6 c2c3 g8f6 g2g4 c8g4 d1d3 c6e5 d3c2 e5f3 g1f3 g4f3 b2b3 f3h1 f1b5");
 	//UciCommand("print");
 	//UciCommand("go movetime 1000");
-	//UciCommand("go depth 6");
+	//UciCommand("go depth 1");
 	char str[4000];
 	while (fgets(str, sizeof(str), stdin))
-		UciCommand(str);
+		UciCommand(pos, str);
+}
+
+static void Init() {
+	for (int pt = PAWN; pt <= KING; pt++) {
+		for (int sq = 0; sq < 64; sq++) {
+			int mg = mg_material[pt] + mg_table[pt][sq];
+			int eg = eg_material[pt] + eg_table[pt][sq];
+			mg_pst[pt][FLIP(sq)] = mg;
+			eg_pst[pt][FLIP(sq)] = eg;
+		}
+	}
+}
+
+static void InitTT(U64 mb) {
+	ttSize = 1;
+	while (ttSize < mb * 1000 * 1000 / (sizeof(TTEntry)) + sizeof(TTEntryEval))
+		ttSize <<= 1;
+	ttMask = ttSize - 1;
+	free(tt);
+	free(ttEval);
+	tt = (TTEntry*)malloc(sizeof(TTEntry) * ttSize);
+	ttEval = (TTEntryEval*)malloc(sizeof(TTEntryEval) * ttSize);
+	TTClear();
 }
 
 int main(const int argc, const char** argv) {
+	Init();
 	InitHash();
+	InitTT(32);
 	printf("%s %s\n", NAME, VERSION);
-	SetFen(START_FEN);
-	UciLoop();
+	SetFen(&position, START_FEN);
+	UciLoop(&position);
 }
